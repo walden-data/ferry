@@ -1,0 +1,17 @@
+[package]
+name = "ferry-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ferry"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ferry-core = { path = "../ferry-core" }
+pyo3.workspace = true
+pyo3-arrow.workspace = true
+
+[features]
+extension-module = ["pyo3/extension-module"]
