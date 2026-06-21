@@ -10,6 +10,7 @@ use ferry_core::state::DuckDbStateStore;
 use ferry_core::traits::{Destination, Source, StateStore};
 use ferry_destinations::FileDestination;
 use ferry_sources::duckdb::DuckDbSource;
+use ferry_sources::postgres::PostgresSource;
 
 // ---------------------------------------------------------------------------
 // CLI argument types
@@ -320,7 +321,7 @@ async fn cmd_run(args: RunArgs) -> Result<(), FerryError> {
 
     for sync_config in &selected_syncs {
         // Create source
-        let source = create_source_from_config(project_dir, sync_config)?;
+        let source = create_source_from_config(project_dir, sync_config).await?;
 
         // Create destination
         let destination = create_destination_from_config(project_dir, sync_config)?;
@@ -379,7 +380,7 @@ async fn cmd_validate() -> Result<(), FerryError> {
 
     // Test source connections
     for sync_config in &all_syncs {
-        match create_source_from_config(project_dir, sync_config) {
+        match create_source_from_config(project_dir, sync_config).await {
             Ok(source) => match source.check_connection().await {
                 Ok(()) => {
                     println!("✓ Source connection OK for sync '{}'", sync_config.name);
@@ -460,7 +461,7 @@ async fn cmd_diff(args: DiffArgs) -> Result<(), FerryError> {
             ))
         })?;
 
-    let source = create_source_from_config(project_dir, sync_config)?;
+    let source = create_source_from_config(project_dir, sync_config).await?;
     let engine = Engine::new(config)?;
 
     let preview = engine
@@ -640,8 +641,9 @@ fn cmd_sources() -> Result<(), FerryError> {
     println!("  {:<15} {:<40}", "Name", "Description");
     println!("  {:<15} {:<40}", "----", "-----------");
     println!("  {:<15} {:<40}", "duckdb", "DuckDB database (MVP)");
+    println!("  {:<15} {:<40}", "postgres", "PostgreSQL database");
     println!();
-    println!("Use `type: duckdb` in ferry.yml to configure.");
+    println!("Use `type: duckdb` or `type: postgres` in ferry.yml to configure.");
     Ok(())
 }
 
@@ -665,7 +667,7 @@ fn cmd_destinations() -> Result<(), FerryError> {
 // ---------------------------------------------------------------------------
 
 /// Create a source connector from a sync config.
-fn create_source_from_config(
+async fn create_source_from_config(
     project_dir: &Path,
     _sync_config: &SyncConfig,
 ) -> Result<Box<dyn Source>, FerryError> {
@@ -684,6 +686,17 @@ fn create_source_from_config(
                     .to_str()
                     .ok_or_else(|| FerryError::Config("Invalid source path".to_string()))?,
             )?;
+            Ok(Box::new(source))
+        }
+        SourceConfig::Postgres {
+            connection_string,
+            query,
+        } => {
+            let source = if let Some(q) = query {
+                PostgresSource::with_query(connection_string, q.clone()).await?
+            } else {
+                PostgresSource::new(connection_string).await?
+            };
             Ok(Box::new(source))
         }
     }

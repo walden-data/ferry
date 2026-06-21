@@ -16,6 +16,10 @@ futures.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+async-stream.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+yaml_serde.workspace = true

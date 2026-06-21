@@ -1,5 +1,6 @@
 pub mod cdc;
 pub mod config;
+pub mod dbt;
 pub mod delivery;
 pub mod engine;
 pub mod env_sub;

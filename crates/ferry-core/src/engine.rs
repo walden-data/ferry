@@ -12,6 +12,7 @@ use crate::cdc::{CursorCdc, HashCdc};
 use crate::config::{
     CdcConfig, CdcMethod, FerryConfig, HashColumns, ModelConfig, SyncConfig, SyncMode,
 };
+use crate::dbt::Manifest;
 use crate::delivery::{DeliveryPipeline, RetryPolicy};
 use crate::error::FerryError;
 use crate::state::DuckDbStateStore;
@@ -106,6 +107,7 @@ pub async fn reconcile(
 pub struct Engine {
     config: FerryConfig,
     state: DuckDbStateStore,
+    manifest: Option<Manifest>,
 }
 
 impl Engine {
@@ -119,10 +121,30 @@ impl Engine {
     /// Create a new Engine from a `FerryConfig`.
     ///
     /// Initializes the DuckDB state store from the configured state path.
+    /// If `dbt.manifest_path` is configured, loads the dbt manifest and checks
+    /// its freshness (warns if >24h old).
     pub fn new(config: FerryConfig) -> Result<Self, FerryError> {
         let state_path = config.state.path.as_deref().unwrap_or(".ferry/state.db");
         let state = DuckDbStateStore::new(Path::new(state_path))?;
-        Ok(Self { config, state })
+
+        let manifest = if let Some(dbt_config) = &config.dbt {
+            if let Some(manifest_path) = &dbt_config.manifest_path {
+                let manifest = Manifest::load(Path::new(manifest_path))?;
+                // Check freshness — warns if >24h old, never errors
+                let _ = manifest.check_freshness(24);
+                Some(manifest)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            state,
+            manifest,
+        })
     }
 
     /// Run a single sync with the given source and destination.
@@ -191,7 +213,7 @@ impl Engine {
         }
 
         // ── Step 3: Extract ────────────────────────────────────────────
-        let query = resolve_query(&sync_config.model);
+        let query = resolve_query(&sync_config.model, self.manifest.as_ref())?;
         let stream = source.read(&query);
         let batches: Vec<RecordBatch> = stream
             .collect::<Vec<Result<RecordBatch, FerryError>>>()
@@ -558,7 +580,7 @@ impl Engine {
         source: &dyn Source,
         sync_config: &SyncConfig,
     ) -> Result<DiffPreview, FerryError> {
-        let query = resolve_query(&sync_config.model);
+        let query = resolve_query(&sync_config.model, self.manifest.as_ref())?;
         let stream = source.read(&query);
         let batches: Vec<RecordBatch> = stream
             .collect::<Vec<Result<RecordBatch, FerryError>>>()
@@ -651,12 +673,23 @@ impl Engine {
 // ---------------------------------------------------------------------------
 
 /// Resolve the SQL query from a model config.
-fn resolve_query(model: &ModelConfig) -> String {
+///
+/// If the model is a `Ref` and a manifest is provided, the model's compiled
+/// SQL is looked up in the manifest. If no manifest is available, `Ref` models
+/// produce an error.
+fn resolve_query(model: &ModelConfig, manifest: Option<&Manifest>) -> Result<String, FerryError> {
     match model {
-        ModelConfig::Sql { sql } => sql.clone(),
+        ModelConfig::Sql { sql } => Ok(sql.clone()),
         ModelConfig::Ref { r#ref } => {
-            // For Phase 1, refs are treated as table names
-            format!("SELECT * FROM {}", r#ref)
+            if let Some(manifest) = manifest {
+                manifest.resolve_ref(r#ref)
+            } else {
+                Err(FerryError::Config(format!(
+                    "Sync uses model.ref: '{}' but no dbt manifest is configured. \
+                     Set dbt.manifest_path in ferry.yml to enable dbt ref resolution.",
+                    r#ref
+                )))
+            }
         }
     }
 }
@@ -1535,14 +1568,39 @@ sync:
         let model = ModelConfig::Sql {
             sql: "SELECT * FROM users".to_string(),
         };
-        assert_eq!(resolve_query(&model), "SELECT * FROM users");
+        assert_eq!(resolve_query(&model, None).unwrap(), "SELECT * FROM users");
     }
 
     #[test]
-    fn test_resolve_query_ref() {
+    fn test_resolve_query_ref_without_manifest() {
         let model = ModelConfig::Ref {
             r#ref: "users".to_string(),
         };
-        assert_eq!(resolve_query(&model), "SELECT * FROM users");
+        let result = resolve_query(&model, None);
+        assert!(result.is_err(), "Ref without manifest should error");
+        match result.unwrap_err() {
+            FerryError::Config(msg) => {
+                assert!(
+                    msg.contains("dbt.manifest_path"),
+                    "Error should mention dbt.manifest_path: {msg}"
+                );
+            }
+            other => panic!("Expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_query_ref_with_manifest() {
+        use crate::dbt::Manifest;
+        let manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample_manifest.json");
+        let manifest = Manifest::load(&manifest_path).expect("Should load manifest");
+        let model = ModelConfig::Ref {
+            r#ref: "fct_users".to_string(),
+        };
+        let sql = resolve_query(&model, Some(&manifest)).expect("Should resolve with manifest");
+        assert_eq!(sql, "SELECT id, email, name FROM analytics.fct_users");
     }
 }

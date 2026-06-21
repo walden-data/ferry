@@ -7,5 +7,5 @@ name = "ferry-core"
 requires-python = ">=3.9"
 
 [tool.maturin]
+module-name = "ferry._native"
 features = ["pyo3/extension-module"]
-module-name = "ferry"

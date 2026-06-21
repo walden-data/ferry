@@ -32,7 +32,14 @@ pub struct FerryConfig {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SourceConfig {
-    DuckDB { path: String, query: Option<String> },
+    DuckDB {
+        path: String,
+        query: Option<String>,
+    },
+    Postgres {
+        connection_string: String,
+        query: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +408,14 @@ impl FerryConfig {
                     *path = resolved;
                 }
             }
+            SourceConfig::Postgres {
+                connection_string,
+                query: _,
+            } => {
+                if let Some(resolved) = secrets.resolve("source.postgres", "connection_string") {
+                    *connection_string = resolved;
+                }
+            }
         }
     }
 }
@@ -507,6 +522,9 @@ state:
             SourceConfig::DuckDB { path, query } => {
                 assert_eq!(path, "/data/db.duckdb");
                 assert_eq!(query.as_deref(), Some("SELECT * FROM users"));
+            }
+            SourceConfig::Postgres { .. } => {
+                panic!("Expected DuckDB source config, got Postgres");
             }
         }
     }

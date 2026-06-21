@@ -1,4 +1,5 @@
-use crate::config::{CdcMethod, DestinationConfig, FerryConfig, SyncConfig, SyncMode};
+use crate::config::{CdcMethod, DestinationConfig, FerryConfig, ModelConfig, SyncConfig, SyncMode};
+use crate::dbt::Manifest;
 
 /// A single validation error with context about which field and why.
 #[derive(Debug, Clone)]
@@ -48,6 +49,18 @@ pub fn validate_ferry_config(config: &FerryConfig) -> Result<(), Vec<ValidationE
                 errors.push(ValidationError {
                     field: "source.DuckDB.path".to_string(),
                     message: "DuckDB source path must not be empty".to_string(),
+                    context: "ferry.yml".to_string(),
+                });
+            }
+        }
+        crate::config::SourceConfig::Postgres {
+            connection_string,
+            query: _,
+        } => {
+            if connection_string.trim().is_empty() {
+                errors.push(ValidationError {
+                    field: "source.Postgres.connection_string".to_string(),
+                    message: "PostgreSQL connection string must not be empty".to_string(),
                     context: "ferry.yml".to_string(),
                 });
             }
@@ -201,6 +214,65 @@ pub fn validate_sync_config(config: &SyncConfig) -> Result<(), Vec<ValidationErr
         }
         SyncMode::Mirror => {
             // Mirror mode doesn't require CDC config
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Validate dbt refs across all sync configs.
+///
+/// Checks that:
+/// 1. If any sync uses `ModelConfig::Ref`, `dbt.manifest_path` is configured.
+/// 2. If a manifest is loaded, all refs resolve to actual models.
+pub fn validate_dbt_refs(
+    config: &FerryConfig,
+    manifest: Option<&Manifest>,
+    sync_configs: &[SyncConfig],
+) -> Result<(), Vec<ValidationError>> {
+    let mut errors: Vec<ValidationError> = Vec::new();
+
+    let has_refs = sync_configs
+        .iter()
+        .any(|s| matches!(s.model, ModelConfig::Ref { .. }));
+
+    if !has_refs {
+        return Ok(());
+    }
+
+    // Check that dbt.manifest_path is configured
+    let manifest_configured = config
+        .dbt
+        .as_ref()
+        .and_then(|d| d.manifest_path.as_deref())
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+
+    if !manifest_configured {
+        errors.push(ValidationError {
+            field: "dbt.manifest_path".to_string(),
+            message: "One or more syncs use model.ref but dbt.manifest_path is not configured in ferry.yml".to_string(),
+            context: "ferry.yml".to_string(),
+        });
+        return Err(errors);
+    }
+
+    // If manifest is loaded, verify all refs resolve
+    if let Some(manifest) = manifest {
+        for sync_config in sync_configs {
+            if let ModelConfig::Ref { r#ref } = &sync_config.model {
+                if let Err(e) = manifest.resolve_ref(r#ref) {
+                    errors.push(ValidationError {
+                        field: format!("model.ref: {}", r#ref),
+                        message: e.to_string(),
+                        context: format!("sync:{}", sync_config.name),
+                    });
+                }
+            }
         }
     }
 
