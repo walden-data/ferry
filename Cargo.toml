@@ -27,7 +27,7 @@ yaml_serde = "0.10"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 pyo3 = "0.28"
-pyo3-arrow = "0.18"
+pyo3-arrow = "0.17"
 governor = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 anyhow = "1"
