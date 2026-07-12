@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v7.json",
+    "dbt_version": "1.7.0",
+    "generated_at": "2026-06-19T10:00:00.000Z"
+  },
+  "nodes": {
+    "model.test.fct_users": {
+      "unique_id": "model.test.fct_users",
+      "name": "fct_users",
+      "resource_type": "model",
+      "compiled_code": "SELECT id, email, name FROM analytics.fct_users",
+      "relation_name": "\"analytics\".\"fct_users\"",
+      "config": { "materialized": "table" }
+    }
+  },
+  "sources": {}
+}

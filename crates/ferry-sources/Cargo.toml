@@ -1,0 +1,25 @@
+[package]
+name = "ferry-sources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ferry-core = { path = "../ferry-core" }
+arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+duckdb.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+async-stream.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+yaml_serde.workspace = true

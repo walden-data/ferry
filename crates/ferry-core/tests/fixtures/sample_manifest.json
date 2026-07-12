@@ -1,0 +1,33 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v7.json",
+    "dbt_version": "1.7.0",
+    "generated_at": "2026-06-21T10:00:00.000Z"
+  },
+  "nodes": {
+    "model.test.fct_users": {
+      "unique_id": "model.test.fct_users",
+      "name": "fct_users",
+      "resource_type": "model",
+      "compiled_code": "SELECT id, email, name FROM analytics.fct_users",
+      "relation_name": "\"analytics\".\"fct_users\"",
+      "config": { "materialized": "table" }
+    },
+    "model.test.fct_orders": {
+      "unique_id": "model.test.fct_orders",
+      "name": "fct_orders",
+      "resource_type": "model",
+      "compiled_code": "SELECT order_id, user_id, total FROM analytics.fct_orders WHERE status = 'completed'",
+      "relation_name": "\"analytics\".\"fct_orders\"",
+      "config": { "materialized": "view" }
+    },
+    "model.test.fct_ephemeral": {
+      "unique_id": "model.test.fct_ephemeral",
+      "name": "fct_ephemeral",
+      "resource_type": "model",
+      "compiled_code": "WITH x AS (SELECT 1) SELECT * FROM x",
+      "config": { "materialized": "ephemeral" }
+    }
+  },
+  "sources": {}
+}
