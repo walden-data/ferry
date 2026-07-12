@@ -41,15 +41,6 @@ impl TrackingMockDestination {
         }
     }
 
-    fn written_count(&self) -> usize {
-        self.written_rows
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|b| b.num_rows())
-            .sum()
-    }
-
     fn removed_count(&self) -> usize {
         self.removed_keys.lock().unwrap().len()
     }

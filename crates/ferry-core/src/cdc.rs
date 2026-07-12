@@ -570,7 +570,7 @@ mod tests {
         let schema = Schema::new(vec![Field::new("val", DataType::Float64, false)]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
-            vec![Arc::new(Float64Array::from(vec![3.14159]))],
+            vec![Arc::new(Float64Array::from(vec![std::f64::consts::PI]))],
         )
         .unwrap();
 

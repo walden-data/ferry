@@ -663,7 +663,6 @@ mod tests {
 
     struct MockDestination {
         name: String,
-        rows_written: Vec<RecordBatch>,
         max_batch: usize,
         rate_limit: Option<RateLimit>,
         idempotency: IdempotencyCapability,
@@ -675,7 +674,6 @@ mod tests {
         fn new(name: &str, max_batch: usize) -> Self {
             Self {
                 name: name.to_string(),
-                rows_written: Vec::new(),
                 max_batch,
                 rate_limit: None,
                 idempotency: IdempotencyCapability::Idempotent,
@@ -692,14 +690,6 @@ mod tests {
                 rows_written: 0,
                 errors,
             };
-            self
-        }
-
-        fn with_rate_limit(mut self, rps: f64) -> Self {
-            self.rate_limit = Some(RateLimit {
-                requests_per_second: Some(rps),
-                concurrent_requests: None,
-            });
             self
         }
 
@@ -770,18 +760,12 @@ mod tests {
 
     struct MockStateStore {
         synced_pks: HashSet<PrimaryKey>,
-        pending_calls: Vec<(PrimaryKey, String, DateTime<Utc>)>,
-        dead_calls: Vec<(PrimaryKey, String)>,
-        synced_calls: Vec<(Vec<PrimaryKey>, String)>,
     }
 
     impl MockStateStore {
         fn new() -> Self {
             Self {
                 synced_pks: HashSet::new(),
-                pending_calls: Vec::new(),
-                dead_calls: Vec::new(),
-                synced_calls: Vec::new(),
             }
         }
 

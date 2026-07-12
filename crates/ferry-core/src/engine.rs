@@ -1010,15 +1010,6 @@ mod tests {
             self.remove_cap = cap;
             self
         }
-
-        fn written_count(&self) -> usize {
-            self.written_batches
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|b| b.num_rows())
-                .sum()
-        }
     }
 
     #[async_trait]

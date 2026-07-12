@@ -2,12 +2,16 @@
 //!
 //! Provides utilities for creating temporary DuckDB databases, test configs,
 //! and test data for the integration test suite.
+//!
+//! Each integration test binary includes this module and uses only a subset of
+//! the helpers. `#[allow(dead_code)]` silences per-binary dead-code warnings for
+//! the shared helpers that other binaries use. This is scoped to this test-only
+//! support module only; it does not suppress lints in product code.
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use arrow_array::{Int32Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
 use duckdb::Connection;
 use tempfile::TempDir;
 
@@ -18,7 +22,7 @@ use ferry_core::config::{
 };
 use ferry_core::engine::{Engine, RunOptions};
 use ferry_core::error::FerryError;
-use ferry_core::traits::{Destination, Source, StateStore};
+use ferry_core::traits::{Destination, Source};
 use ferry_destinations::{FileDestination, FileFormat, MockRestDestination};
 use ferry_sources::duckdb::DuckDbSource;
 
@@ -44,27 +48,6 @@ pub fn setup_test_db(tables_sql: &str, insert_sql: &str) -> (TempDir, PathBuf) {
     conn.execute_batch(insert_sql)
         .expect("Failed to insert data");
     (dir, db_path)
-}
-
-/// Create a users table with id (INTEGER), name (VARCHAR), email (VARCHAR).
-pub fn create_users_table() -> &'static str {
-    "CREATE TABLE users (
-         id INTEGER PRIMARY KEY,
-         name VARCHAR NOT NULL,
-         email VARCHAR NOT NULL
-     );"
-}
-
-/// Insert N test users with deterministic data.
-pub fn insert_users(n: usize) -> String {
-    let mut sql = String::new();
-    for i in 0..n {
-        sql.push_str(&format!(
-            "INSERT INTO users VALUES ({}, 'User {}', 'user{}@example.com');\n",
-            i, i, i
-        ));
-    }
-    sql
 }
 
 /// Create a test table with id (VARCHAR), name (VARCHAR), value (INTEGER).
@@ -268,66 +251,9 @@ pub fn create_success_destination() -> MockRestDestination {
     MockRestDestination::success()
 }
 
-/// Create a `MockRestDestination` that succeeds for the first N rows.
-pub fn create_partial_destination(fail_after: usize) -> MockRestDestination {
-    MockRestDestination::partial_success(fail_after)
-}
-
 /// Create a `FileDestination` that writes CSV files.
 pub fn create_file_destination(output_dir: &std::path::Path, sync_name: &str) -> FileDestination {
     FileDestination::new(output_dir, FileFormat::Csv, sync_name)
-}
-
-// ---------------------------------------------------------------------------
-// RecordBatch helpers
-// ---------------------------------------------------------------------------
-
-/// Create a test RecordBatch with id (Utf8), name (Utf8), value (Int32).
-pub fn create_test_batch(rows: usize) -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("name", DataType::Utf8, true),
-        Field::new("value", DataType::Int32, true),
-    ]));
-
-    let ids: Vec<String> = (0..rows).map(|i| format!("pk-{:04}", i)).collect();
-    let names: Vec<Option<String>> = (0..rows).map(|i| Some(format!("name-{}", i))).collect();
-    let values: Vec<Option<i32>> = (0..rows).map(|i| Some(i as i32)).collect();
-
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(StringArray::from(ids)),
-            Arc::new(StringArray::from(names)),
-            Arc::new(Int32Array::from(values)),
-        ],
-    )
-    .expect("Failed to create test batch")
-}
-
-/// Create a test RecordBatch with id (Int32), name (Utf8), email (Utf8).
-pub fn create_users_batch(rows: usize) -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("email", DataType::Utf8, false),
-    ]));
-
-    let ids: Vec<i32> = (0..rows as i32).collect();
-    let names: Vec<String> = (0..rows).map(|i| format!("User {}", i)).collect();
-    let emails: Vec<String> = (0..rows)
-        .map(|i| format!("user{}@example.com", i))
-        .collect();
-
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(Int32Array::from(ids)),
-            Arc::new(StringArray::from(names)),
-            Arc::new(StringArray::from(emails)),
-        ],
-    )
-    .expect("Failed to create users batch")
 }
 
 // ---------------------------------------------------------------------------
@@ -349,24 +275,4 @@ pub async fn count_synced_rows(engine: &Engine, sync_name: &str) -> usize {
         )
         .unwrap_or(0);
     count as usize
-}
-
-/// Get the number of pending rows for a sync.
-pub async fn count_pending_rows(engine: &Engine, sync_name: &str) -> usize {
-    engine
-        .state()
-        .get_pending_rows(sync_name)
-        .await
-        .unwrap_or_default()
-        .len()
-}
-
-/// Get the number of dead rows for a sync.
-pub async fn count_dead_rows(engine: &Engine, sync_name: &str) -> usize {
-    engine
-        .state()
-        .get_dead_rows(sync_name)
-        .await
-        .unwrap_or_default()
-        .len()
 }
