@@ -15,7 +15,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-arrow = "58"
+arrow = "59"
 arrow-array = "58"
 arrow-schema = "58"
 arrow-cast = "58"
