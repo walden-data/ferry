@@ -82,7 +82,7 @@ impl RetryPolicy {
             return chrono::Duration::zero();
         }
         let max_jitter_ms = (delay_ms as f64 * 0.10) as i64;
-        let jitter_ms = rand::thread_rng().gen_range(0..=max_jitter_ms);
+        let jitter_ms = rand::rng().random_range(0..=max_jitter_ms);
         chrono::Duration::milliseconds(jitter_ms)
     }
 }
