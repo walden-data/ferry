@@ -883,6 +883,13 @@ mod tests {
                 url: "https://api.example.com/test".to_string(),
                 method: Some("POST".to_string()),
                 headers: None,
+                auth: None,
+                body_template: None,
+                timeout_secs: None,
+                connect_timeout_secs: None,
+                max_response_bytes: None,
+                allow_http: None,
+                max_batch_size: None,
             },
             sync: SyncSettings {
                 mode,

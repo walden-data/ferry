@@ -153,7 +153,7 @@ ferry mcp run                       # MCP server for AI tools
 
 | Connector | Install | Status |
 |-----------|---------|--------|
-| REST API (generic) | `ferry-core` (included) | Planned |
+| REST API (generic) | `ferry-core` (included) | Implemented |
 | Braze | `ferry-core` (included) | Planned |
 | HubSpot | `ferry-core` (included) | Planned |
 | Salesforce (Bulk API 2.0) | `ferry-core[salesforce]` | Planned |
@@ -161,7 +161,76 @@ ferry mcp run                       # MCP server for AI tools
 | S3 / GCS / Azure Blob | `ferry-core[cloud-storage]` | Planned |
 | SFTP | `ferry-core[sftp]` | Planned |
 | PostgreSQL (upsert) | `ferry-core[postgres]` | Planned |
-| CSV / Parquet / JSON file | `ferry-core` (included) | Planned |
+| CSV / Parquet / JSON file | `ferry-core` (included) | Implemented |
+
+#### REST destination
+
+The generic REST destination sends one HTTP request per batch (default JSON array of row objects; an optional minijinja `body_template` overrides the payload).
+
+```yaml
+# syncs/push_users_to_api.yml
+name: push_users_to_api
+description: "Sync users to a REST endpoint"
+model:
+  sql: SELECT id, email, plan_tier FROM users
+destination:
+  type: rest
+  url: https://api.example.com/users/ingest
+  method: POST
+  headers:
+    - name: X-Source
+      value: ferry
+  auth:
+    type: bearer       # bearer | basic | api_key | none
+    token: ""           # resolved from secrets.toml [destination.rest] bearer_token
+  body_template: '{"events": {{ rows | tojson }}}'   # optional
+  timeout_secs: 30
+  connect_timeout_secs: 10
+  max_response_bytes: 1048576   # 1 MiB
+  allow_http: false              # https-only by default; set true for localhost testing
+  max_batch_size: 100
+sync:
+  mode: incremental
+  cursor_field: updated_at
+  cdc:
+    method: hash
+  delivery:
+    batch_size: 100
+    retry:
+      max_attempts: 5
+      backoff: exponential
+```
+
+Secrets (bearer tokens, basic auth, API keys) live in `secrets.toml` under `[destination.rest]`, not in YAML:
+
+```toml
+# secrets.toml (chmod 600)
+[destination.rest]
+bearer_token = "your-secret-token"
+# basic_username = "alice"
+# basic_password = "p@ss"
+# api_key = "your-api-key"
+# api_key_header_name = "X-Api-Key"
+# header.<name> = "value"   # resolve raw header values by key
+```
+
+**Defaults**: `method=POST`, `timeout_secs=30`, `connect_timeout_secs=10`, `max_response_bytes=1 MiB`, `max_batch_size=100`, `allow_http=false`.
+
+**Status classification** (drives the pipeline's retry / dead-letter behavior):
+- `2xx` → all rows succeed.
+- `408, 425, 429, 5xx` → retryable; `Retry-After` (delta-seconds or HTTP-date) is parsed, capped at 300s, and surfaced via the existing delivery string contract.
+- other `4xx` → permanent (dead-letter) — configure `sync.delivery.on_reject` rules to override.
+- network/transport errors → retryable (default backoff).
+
+**Security**:
+- HTTPS by default; `http://` requires explicit `allow_http: true` (intended for localhost testing).
+- Redirects are disabled (`Policy::none()`); 3xx responses surface as errors. This prevents credential leakage to attacker-controlled redirect hosts and blocks HTTPS→HTTP downgrade attacks.
+- Auth headers are applied per-request with `set_sensitive(true)` and never enter the shared client's `default_headers`. Configured static header values are also marked sensitive.
+- Response bodies in errors are truncated to 512 bytes; `retry_after` markers are stripped from bodies (preventing injection); exact known auth values (bearer tokens, Basic base64 credentials, API keys, configured header values) are replaced with `***` before persisting.
+- Secrets never appear in `RowError` strings or the state DB journal (unit + integration tested, including server-echo scenarios).
+- URL userinfo (`user:pass@host`) is rejected at validation and construction; query strings are redacted in Debug output.
+
+**Limitations (deferred from the initial release)**: per-row request mode; per-row response→row-status mapping; SSRF private-IP/loopback blocking; configurable idempotency-key templates; per-destination rate limiting (governor stays pipeline-level); custom CA certificates; streaming response bodies; retry of non-idempotent POST on network errors.
 
 ## Orchestration: dagster-ferry
 

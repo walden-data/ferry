@@ -1,5 +1,18 @@
-use crate::config::{CdcMethod, DestinationConfig, FerryConfig, ModelConfig, SyncConfig, SyncMode};
+use crate::config::{
+    AuthConfig, CdcMethod, DestinationConfig, FerryConfig, ModelConfig, SyncConfig, SyncMode,
+};
 use crate::dbt::Manifest;
+
+/// Max response body size accepted by the REST destination (64 MiB).
+const MAX_RESPONSE_BYTES_CAP: usize = 64 * 1024 * 1024;
+/// Default max response body size (1 MiB).
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Default total request timeout (30 s).
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// Default connect timeout (10 s).
+pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Default per-destination max batch size (100 rows).
+pub const DEFAULT_MAX_BATCH_SIZE: usize = 100;
 
 /// A single validation error with context about which field and why.
 #[derive(Debug, Clone)]
@@ -140,14 +153,191 @@ pub fn validate_sync_config(config: &SyncConfig) -> Result<(), Vec<ValidationErr
                 });
             }
         }
-        DestinationConfig::Rest { url, .. } => {
+        DestinationConfig::Rest {
+            url,
+            method,
+            headers,
+            auth,
+            body_template,
+            timeout_secs,
+            connect_timeout_secs,
+            max_response_bytes,
+            allow_http,
+            max_batch_size,
+        } => {
+            let ctx = format!("sync:{}", config.name);
             if url.trim().is_empty() {
                 errors.push(ValidationError {
                     field: "destination.Rest.url".to_string(),
                     message: "REST destination URL must not be empty".to_string(),
-                    context: format!("sync:{}", config.name),
+                    context: ctx.clone(),
+                });
+            } else {
+                // Parse and validate URL scheme.
+                let parsed = url::Url::parse(url).map_err(|e| ValidationError {
+                    field: "destination.Rest.url".to_string(),
+                    message: format!("invalid URL: {e}"),
+                    context: ctx.clone(),
+                });
+                match parsed {
+                    Ok(u) => {
+                        // Reject embedded URL userinfo — secrets must live in
+                        // secrets.toml, never in the manifest URL. A URL with
+                        // userinfo (`scheme://user:pass@host`) is a secret-leak
+                        // vector via logs, Debug output, and reqwest error
+                        // Display strings.
+                        if !u.username().is_empty() || u.password().is_some() {
+                            errors.push(ValidationError {
+                                field: "destination.Rest.url".to_string(),
+                                message: "REST URL must not contain userinfo (user:password@); store credentials in secrets.toml via the auth config".to_string(),
+                                context: ctx.clone(),
+                            });
+                        }
+                        let allow_http = allow_http.unwrap_or(false);
+                        let scheme = u.scheme();
+                        let scheme_ok = match scheme {
+                            "https" => true,
+                            "http" => allow_http,
+                            _ => false,
+                        };
+                        if !scheme_ok {
+                            errors.push(ValidationError {
+                                field: "destination.Rest.url".to_string(),
+                                message: if scheme == "http" {
+                                    "REST URL scheme 'http' is not allowed by default; set allow_http: true to opt in (intended for localhost testing only)".to_string()
+                                } else {
+                                    format!("REST URL scheme '{scheme}' is not supported; use https (or http with allow_http: true for localhost)")
+                                },
+                                context: ctx.clone(),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(e);
+                    }
+                }
+            }
+
+            // Method validation (default POST).
+            let method_str = method.as_deref().unwrap_or("POST").to_uppercase();
+            if !matches!(
+                method_str.as_str(),
+                "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+            ) {
+                errors.push(ValidationError {
+                    field: "destination.Rest.method".to_string(),
+                    message: format!(
+                        "REST method '{method_str}' is not supported; expected one of GET, POST, PUT, PATCH, DELETE"
+                    ),
+                    context: ctx.clone(),
                 });
             }
+
+            // Header names legality + values no CRLF.
+            if let Some(headers) = headers {
+                for h in headers {
+                    if http::HeaderName::from_bytes(h.name.as_bytes()).is_err() {
+                        errors.push(ValidationError {
+                            field: format!("destination.Rest.headers[{}]", h.name),
+                            message: format!("invalid HTTP header name '{}'", h.name),
+                            context: ctx.clone(),
+                        });
+                    }
+                    if h.value.contains(['\r', '\n']) {
+                        errors.push(ValidationError {
+                            field: format!("destination.Rest.headers[{}]", h.name),
+                            message: format!(
+                                "header value for '{}' contains CRLF — header injection is not allowed",
+                                h.name
+                            ),
+                            context: ctx.clone(),
+                        });
+                    }
+                }
+            }
+
+            // Auth validation.
+            if let Some(auth) = auth {
+                match auth {
+                    AuthConfig::ApiKey { header_name, .. } => {
+                        if header_name.trim().is_empty() {
+                            errors.push(ValidationError {
+                                field: "destination.Rest.auth.api_key.header_name".to_string(),
+                                message: "api_key auth requires a non-empty header_name"
+                                    .to_string(),
+                                context: ctx.clone(),
+                            });
+                        } else if http::HeaderName::from_bytes(header_name.as_bytes()).is_err() {
+                            errors.push(ValidationError {
+                                field: "destination.Rest.auth.api_key.header_name".to_string(),
+                                message: format!(
+                                    "invalid HTTP header name for api_key auth: '{header_name}'"
+                                ),
+                                context: ctx.clone(),
+                            });
+                        }
+                    }
+                    AuthConfig::Bearer { .. } | AuthConfig::Basic { .. } | AuthConfig::None => {}
+                }
+            }
+
+            // Body template parse check (fail fast at config load).
+            if let Some(template) = body_template {
+                if let Err(e) = minijinja::Environment::new().add_template("body", template) {
+                    errors.push(ValidationError {
+                        field: "destination.Rest.body_template".to_string(),
+                        message: format!("invalid minijinja body_template: {e}"),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+
+            // Timeout sanity.
+            if let Some(t) = timeout_secs {
+                if *t == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.Rest.timeout_secs".to_string(),
+                        message: "timeout_secs must be greater than 0".to_string(),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+            if let Some(t) = connect_timeout_secs {
+                if *t == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.Rest.connect_timeout_secs".to_string(),
+                        message: "connect_timeout_secs must be greater than 0".to_string(),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+            if let Some(m) = max_response_bytes {
+                if *m == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.Rest.max_response_bytes".to_string(),
+                        message: "max_response_bytes must be greater than 0".to_string(),
+                        context: ctx.clone(),
+                    });
+                } else if *m > MAX_RESPONSE_BYTES_CAP {
+                    errors.push(ValidationError {
+                        field: "destination.Rest.max_response_bytes".to_string(),
+                        message: format!(
+                            "max_response_bytes ({m}) exceeds the maximum allowed cap of {MAX_RESPONSE_BYTES_CAP} bytes"
+                        ),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+            if let Some(m) = max_batch_size {
+                if *m == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.Rest.max_batch_size".to_string(),
+                        message: "max_batch_size must be at least 1".to_string(),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+            let _ = allow_http; // already consumed by URL scheme check
         }
         DestinationConfig::File { output_dir, .. } => {
             if output_dir.trim().is_empty() {
@@ -317,6 +507,13 @@ mod tests {
                 url: "https://api.example.com/users".to_string(),
                 method: Some("POST".to_string()),
                 headers: None,
+                auth: None,
+                body_template: None,
+                timeout_secs: None,
+                connect_timeout_secs: None,
+                max_response_bytes: None,
+                allow_http: None,
+                max_batch_size: None,
             },
             sync: SyncSettings {
                 mode: SyncMode::Incremental,
@@ -413,6 +610,13 @@ mod tests {
                 url: "".to_string(),
                 method: None,
                 headers: None,
+                auth: None,
+                body_template: None,
+                timeout_secs: None,
+                connect_timeout_secs: None,
+                max_response_bytes: None,
+                allow_http: None,
+                max_batch_size: None,
             },
             sync: SyncSettings {
                 mode: SyncMode::Incremental,

@@ -26,6 +26,9 @@ uuid.workspace = true
 r2d2.workspace = true
 futures.workspace = true
 rand.workspace = true
+url.workspace = true
+minijinja.workspace = true
+http.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

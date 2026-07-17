@@ -136,7 +136,13 @@ pub fn split_record_batch(batch: &RecordBatch, chunk_size: usize) -> Vec<RecordB
 /// Classify a `RowError` against the reject rules in `RejectConfig`.
 ///
 /// Returns the matching `RejectAction`, or a default based on whether the
-/// error looks retryable (5xx, timeout, etc.) vs permanent (4xx, validation).
+/// error looks retryable vs permanent:
+/// - **5xx, 408, 425, 429, and connection errors (no status code)** → `Retry`.
+/// - **other 4xx** → `DeadLetter`.
+///
+/// Explicit `on_reject` rules override the default for the status codes /
+/// body patterns they match. This ensures transient HTTP status codes are
+/// always retried unless an operator explicitly classifies them otherwise.
 pub fn classify_error(error: &RowError, config: &RejectConfig) -> RejectAction {
     let status_code = extract_status_code(&error.error);
     let body = &error.error;
@@ -147,9 +153,13 @@ pub fn classify_error(error: &RowError, config: &RejectConfig) -> RejectAction {
         }
     }
 
-    // Default: retry on 5xx / connection errors, dead letter on 4xx
+    // Default: retry on 5xx / 408 / 425 / 429 / connection errors, dead letter
+    // on other 4xx. This keeps transient HTTP errors retryable even when an
+    // operator configures *some* `on_reject` rules (unmatched codes fall
+    // through to this default).
     match status_code {
         Some(code) if (500..=599).contains(&code) => RejectAction::Retry,
+        Some(408) | Some(425) | Some(429) => RejectAction::Retry,
         Some(_) => RejectAction::DeadLetter,
         None => RejectAction::Retry,
     }
@@ -415,6 +425,7 @@ impl<'a> DeliveryPipeline<'a> {
                 sync_name: self.sync_name.clone(),
                 batch_index: batch_idx,
                 total_batches,
+                pk_col: Some(self.pk_col.clone()),
             };
 
             let write_result = match self.destination.write(chunk, &write_config).await {
@@ -539,6 +550,7 @@ impl<'a> DeliveryPipeline<'a> {
                         sync_name: self.sync_name.clone(),
                         batch_index: 0,
                         total_batches: 1,
+                        pk_col: Some(self.pk_col.clone()),
                     };
                     let remove_result = self
                         .destination
@@ -561,6 +573,7 @@ impl<'a> DeliveryPipeline<'a> {
                     sync_name: self.sync_name.clone(),
                     batch_index: 0,
                     total_batches: 1,
+                    pk_col: Some(self.pk_col.clone()),
                 };
                 let _write_result = self
                     .destination
@@ -605,20 +618,28 @@ impl<'a> DeliveryPipeline<'a> {
 ///
 /// Looks for "retry_after" or "Retry-After" followed by a duration in the
 /// error messages. Returns `None` if no Retry-After is found.
+///
+/// Always clamps to a maximum of 300 seconds to prevent a malicious or
+/// buggy server from stalling the sync indefinitely.
 fn extract_retry_after(result: &WriteResult) -> Option<std::time::Duration> {
+    const MAX_RETRY_AFTER_SECS: u64 = 300;
     for error in &result.errors {
         let lower = error.error.to_lowercase();
         // Look for patterns like "retry_after: 30", "retry-after: 30s", etc.
         if let Some(pos) = lower.find("retry_after") {
             let rest = &lower[pos + 11..];
             if let Some(secs) = extract_number(rest) {
-                return Some(std::time::Duration::from_secs(secs));
+                return Some(std::time::Duration::from_secs(
+                    secs.min(MAX_RETRY_AFTER_SECS),
+                ));
             }
         }
         if let Some(pos) = lower.find("retry-after") {
             let rest = &lower[pos + 11..];
             if let Some(secs) = extract_number(rest) {
-                return Some(std::time::Duration::from_secs(secs));
+                return Some(std::time::Duration::from_secs(
+                    secs.min(MAX_RETRY_AFTER_SECS),
+                ));
             }
         }
     }
@@ -1177,6 +1198,160 @@ mod tests {
         };
         let action = classify_error(&error, &config);
         assert_eq!(action, RejectAction::Retry);
+    }
+
+    // ── classify_error: transient 4xx/5xx defaults (D5) ──────────────
+
+    #[test]
+    fn test_classify_error_408_default_retry() {
+        // 408 is transient even when on_reject rules exist (unmatched).
+        let config = RejectConfig {
+            classify: vec![RejectRule {
+                match_: RejectMatch {
+                    status_code: Some(400),
+                    body_contains: None,
+                },
+                action: RejectAction::DeadLetter,
+            }],
+        };
+        let error = RowError {
+            primary_key: "pk1".to_string(),
+            error: "HTTP 408 Request Timeout".to_string(),
+        };
+        assert_eq!(classify_error(&error, &config), RejectAction::Retry);
+    }
+
+    #[test]
+    fn test_classify_error_425_default_retry() {
+        let config = RejectConfig {
+            classify: vec![RejectRule {
+                match_: RejectMatch {
+                    status_code: Some(400),
+                    body_contains: None,
+                },
+                action: RejectAction::DeadLetter,
+            }],
+        };
+        let error = RowError {
+            primary_key: "pk1".to_string(),
+            error: "HTTP 425 Too Early".to_string(),
+        };
+        assert_eq!(classify_error(&error, &config), RejectAction::Retry);
+    }
+
+    #[test]
+    fn test_classify_error_429_default_retry() {
+        let config = RejectConfig { classify: vec![] };
+        let error = RowError {
+            primary_key: "pk1".to_string(),
+            error: "HTTP 429 Too Many Requests".to_string(),
+        };
+        assert_eq!(classify_error(&error, &config), RejectAction::Retry);
+    }
+
+    #[test]
+    fn test_classify_error_500_default_retry_with_unmatched_rules() {
+        let config = RejectConfig {
+            classify: vec![RejectRule {
+                match_: RejectMatch {
+                    status_code: Some(400),
+                    body_contains: None,
+                },
+                action: RejectAction::DeadLetter,
+            }],
+        };
+        let error = RowError {
+            primary_key: "pk1".to_string(),
+            error: "HTTP 500 Internal Server Error".to_string(),
+        };
+        assert_eq!(classify_error(&error, &config), RejectAction::Retry);
+    }
+
+    #[test]
+    fn test_classify_error_400_default_dead_letter_with_unmatched_rules() {
+        let config = RejectConfig {
+            classify: vec![RejectRule {
+                match_: RejectMatch {
+                    status_code: Some(429),
+                    body_contains: None,
+                },
+                action: RejectAction::Retry,
+            }],
+        };
+        let error = RowError {
+            primary_key: "pk1".to_string(),
+            error: "HTTP 400 Bad Request".to_string(),
+        };
+        assert_eq!(classify_error(&error, &config), RejectAction::DeadLetter);
+    }
+
+    #[test]
+    fn test_classify_error_explicit_override_429_to_dead_letter() {
+        // An explicit on_reject rule for 429 → DeadLetter must override the
+        // default retry behavior.
+        let config = RejectConfig {
+            classify: vec![RejectRule {
+                match_: RejectMatch {
+                    status_code: Some(429),
+                    body_contains: None,
+                },
+                action: RejectAction::DeadLetter,
+            }],
+        };
+        let error = RowError {
+            primary_key: "pk1".to_string(),
+            error: "HTTP 429 Too Many Requests".to_string(),
+        };
+        assert_eq!(classify_error(&error, &config), RejectAction::DeadLetter);
+    }
+
+    #[test]
+    fn test_classify_error_network_error_default_retry() {
+        let config = RejectConfig { classify: vec![] };
+        let error = RowError {
+            primary_key: "pk1".to_string(),
+            error: "HTTP transport: connection refused".to_string(),
+        };
+        assert_eq!(classify_error(&error, &config), RejectAction::Retry);
+    }
+
+    // ── extract_retry_after central clamp (B4) ───────────────────────
+
+    #[test]
+    fn test_extract_retry_after_clamps_to_300() {
+        // A malicious body-injected or header-derived value of 99999999999
+        // must be clamped to 300 seconds centrally in the pipeline.
+        let result = WriteResult {
+            rows_written: 0,
+            errors: vec![RowError {
+                primary_key: "pk1".to_string(),
+                error: "HTTP 429 Too Many Requests; retry_after: 99999999999".to_string(),
+            }],
+        };
+        let d = extract_retry_after(&result).unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_extract_retry_after_normal_value() {
+        let result = WriteResult {
+            rows_written: 0,
+            errors: vec![RowError {
+                primary_key: "pk1".to_string(),
+                error: "HTTP 429; retry_after: 30".to_string(),
+            }],
+        };
+        let d = extract_retry_after(&result).unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_extract_retry_after_none() {
+        let result = WriteResult {
+            rows_written: 1,
+            errors: vec![],
+        };
+        assert!(extract_retry_after(&result).is_none());
     }
 
     // ── filter_undelivered tests ──────────────────────────────────────

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use ferry_core::config::{DestinationConfig, FerryConfig, FileFormat, SourceConfig, SyncConfig};
 use ferry_core::error::FerryError;
 use ferry_core::traits::{Destination, Source};
-use ferry_destinations::FileDestination;
+use ferry_destinations::{FileDestination, RestDestination};
 use ferry_sources::duckdb::DuckDbSource;
 use ferry_sources::postgres::PostgresSource;
 
@@ -65,9 +65,10 @@ pub fn create_destination(
             let dest = FileDestination::new(&resolved_dir, file_format, &sync_config.name);
             Ok(Box::new(dest))
         }
-        DestinationConfig::Rest { .. } => Err(FerryError::Config(
-            "REST destination not yet implemented in Phase 1".to_string(),
-        )),
+        DestinationConfig::Rest { .. } => {
+            let dest = RestDestination::new(&sync_config.destination, &sync_config.name)?;
+            Ok(Box::new(dest))
+        }
         DestinationConfig::Braze { .. } => Err(FerryError::Config(
             "Braze destination not yet implemented in Phase 1".to_string(),
         )),
