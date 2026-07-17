@@ -8,7 +8,7 @@ use ferry_core::engine::{Engine, RunOptions, SyncResult};
 use ferry_core::error::FerryError;
 use ferry_core::state::DuckDbStateStore;
 use ferry_core::traits::{Destination, Source, StateStore};
-use ferry_destinations::FileDestination;
+use ferry_destinations::{FileDestination, RestDestination};
 use ferry_sources::duckdb::DuckDbSource;
 use ferry_sources::postgres::PostgresSource;
 
@@ -724,9 +724,10 @@ fn create_destination_from_config(
             let dest = FileDestination::new(&resolved_dir, file_format, &sync_config.name);
             Ok(Box::new(dest))
         }
-        DestinationConfig::Rest { .. } => Err(FerryError::Config(
-            "REST destination not yet implemented in Phase 1".to_string(),
-        )),
+        DestinationConfig::Rest { .. } => {
+            let dest = RestDestination::new(&sync_config.destination, &sync_config.name)?;
+            Ok(Box::new(dest))
+        }
         DestinationConfig::Braze { .. } => Err(FerryError::Config(
             "Braze destination not yet implemented in Phase 1".to_string(),
         )),

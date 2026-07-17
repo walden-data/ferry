@@ -118,9 +118,24 @@ pub enum DestinationConfig {
     },
     Rest {
         url: String,
+        #[serde(default)]
         method: Option<String>,
         #[serde(default)]
         headers: Option<Vec<HeaderConfig>>,
+        #[serde(default)]
+        auth: Option<AuthConfig>,
+        #[serde(default)]
+        body_template: Option<String>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        connect_timeout_secs: Option<u64>,
+        #[serde(default)]
+        max_response_bytes: Option<usize>,
+        #[serde(default)]
+        allow_http: Option<bool>,
+        #[serde(default)]
+        max_batch_size: Option<usize>,
     },
     File {
         output_dir: String,
@@ -129,10 +144,59 @@ pub enum DestinationConfig {
 }
 
 /// An HTTP header for REST destinations.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct HeaderConfig {
     pub name: String,
     pub value: String,
+}
+
+/// Authentication configuration for REST destinations.
+///
+/// Secrets (token, password, api key value) are masked in `Debug` output to
+/// avoid leaking them through `FerryConfig`'s derived `Debug`.
+#[derive(Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AuthConfig {
+    /// `Authorization: Bearer <token>` header.
+    Bearer {
+        #[serde(default)]
+        token: String,
+    },
+    /// `Authorization: Basic <base64(user:pass)>` header.
+    Basic {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        password: String,
+    },
+    /// A custom header (e.g. `X-Api-Key: <value>`).
+    ApiKey {
+        #[serde(default)]
+        header_name: String,
+        #[serde(default)]
+        value: String,
+    },
+    /// No auth (default).
+    None,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthConfig::Bearer { .. } => f.debug_struct("Bearer").field("token", &"***").finish(),
+            AuthConfig::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            AuthConfig::ApiKey { header_name, .. } => f
+                .debug_struct("ApiKey")
+                .field("header_name", header_name)
+                .field("value", &"***")
+                .finish(),
+            AuthConfig::None => f.write_str("None"),
+        }
+    }
 }
 
 /// Output file format for file destinations.
@@ -423,7 +487,10 @@ impl FerryConfig {
 impl SyncConfig {
     /// Load a single sync configuration from a YAML file path.
     ///
-    /// Substitutes environment variables before parsing.
+    /// Substitutes environment variables before parsing. If a `secrets.toml`
+    /// exists in the project directory (the parent of the file's directory, or
+    /// the file's directory itself), destination secrets are resolved into
+    /// the config before validation.
     pub fn load(path: &Path) -> Result<Self, FerryError> {
         let raw = std::fs::read_to_string(path).map_err(|e| {
             FerryError::Config(format!("Cannot read sync file {}: {e}", path.display()))
@@ -431,9 +498,16 @@ impl SyncConfig {
 
         let substituted = substitute_env_vars(&raw)?;
 
-        let config: SyncConfig = yaml_serde::from_str(&substituted).map_err(|e| {
+        let mut config: SyncConfig = yaml_serde::from_str(&substituted).map_err(|e| {
             FerryError::Config(format!("Cannot parse sync file {}: {e}", path.display()))
         })?;
+
+        // Resolve destination secrets from secrets.toml if present in the
+        // project directory (parent of the sync file's directory, or the
+        // directory itself for direct loads).
+        if let Some(secrets) = find_secrets_for(path)? {
+            config.resolve_secrets(&secrets);
+        }
 
         // Validate
         validate_sync_config(&config).map_err(|errors| {
@@ -447,7 +521,9 @@ impl SyncConfig {
     /// Load all sync configurations from a directory of `*.yml` files.
     ///
     /// Reads every file matching `*.yml` in the given directory, parses each
-    /// as a `SyncConfig`, and returns them in a `Vec`.
+    /// as a `SyncConfig`, resolves destination secrets from `secrets.toml`
+    /// in the project directory (parent of the syncs dir), and returns them
+    /// in a `Vec`.
     pub fn load_all(syncs_dir: &Path) -> Result<Vec<Self>, FerryError> {
         if !syncs_dir.exists() {
             return Err(FerryError::Config(format!(
@@ -483,6 +559,108 @@ impl SyncConfig {
 
         Ok(configs)
     }
+
+    /// Resolve destination secret values from `secrets.toml` into this sync's
+    /// destination config. Source secrets are handled at the `FerryConfig`
+    /// level (`FerryConfig::resolve_secrets`).
+    pub fn resolve_secrets(&mut self, secrets: &Secrets) {
+        if let DestinationConfig::Rest { auth, headers, .. } = &mut self.destination {
+            // Auth resolution
+            if let Some(auth) = auth.as_mut() {
+                resolve_auth_secrets(auth, secrets);
+            }
+            // Raw header value resolution: each header value is treated as a
+            // secret key under `destination.rest` (e.g. `header.Authorization`
+            // or simply the header name lowercased). The header value in YAML
+            // is interpreted as a key into `destination.rest`.
+            if let Some(headers) = headers.as_mut() {
+                for h in headers.iter_mut() {
+                    let key = h.value.trim();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    // First try the raw key, then `header.{key}`.
+                    if let Some(v) = secrets
+                        .resolve("destination.rest", key)
+                        .or_else(|| secrets.resolve("destination.rest", &format!("header.{key}")))
+                    {
+                        h.value = v;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a secret value from `secrets.toml`'s `[destination.rest]` section.
+fn resolve_auth_secrets(auth: &mut AuthConfig, secrets: &Secrets) {
+    let section = "destination.rest";
+    match auth {
+        AuthConfig::Bearer { token } => {
+            if token.trim().is_empty() {
+                if let Some(v) = secrets.resolve(section, "bearer_token") {
+                    *token = v;
+                } else if let Some(v) = secrets.resolve(section, "token") {
+                    *token = v;
+                }
+            }
+        }
+        AuthConfig::Basic { username, password } => {
+            if username.trim().is_empty() {
+                if let Some(v) = secrets.resolve(section, "basic_username") {
+                    *username = v;
+                } else if let Some(v) = secrets.resolve(section, "username") {
+                    *username = v;
+                }
+            }
+            if password.trim().is_empty() {
+                if let Some(v) = secrets.resolve(section, "basic_password") {
+                    *password = v;
+                } else if let Some(v) = secrets.resolve(section, "password") {
+                    *password = v;
+                }
+            }
+        }
+        AuthConfig::ApiKey { header_name, value } => {
+            if header_name.trim().is_empty() {
+                if let Some(v) = secrets.resolve(section, "api_key_header_name") {
+                    *header_name = v;
+                }
+            }
+            if value.trim().is_empty() {
+                if let Some(v) = secrets.resolve(section, "api_key") {
+                    *value = v;
+                }
+            }
+        }
+        AuthConfig::None => {}
+    }
+}
+
+/// Locate a `secrets.toml` file relevant to the given path.
+///
+/// Looks in the parent of the file's directory (the project dir for the
+/// typical `syncs/*.yml` layout), then the file's directory itself. Returns
+/// `None` if no secrets file exists (no error — secrets are optional).
+/// Propagates errors from `Secrets::load` (e.g. insecure permissions) so
+/// operators learn about misconfigured secrets files rather than silently
+/// missing resolution.
+fn find_secrets_for(path: &Path) -> Result<Option<Secrets>, FerryError> {
+    let file_dir = match path.parent() {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let project_dir = file_dir.parent().unwrap_or(file_dir);
+    let candidates = [
+        project_dir.join("secrets.toml"),
+        file_dir.join("secrets.toml"),
+    ];
+    for cand in candidates {
+        if cand.exists() {
+            return Secrets::load(&cand);
+        }
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -764,6 +942,314 @@ hash_columns: 123
         assert!(
             result.is_err(),
             "hash_columns: 123 should fail to deserialize"
+        );
+    }
+
+    #[test]
+    fn test_rest_config_minimal_yaml_backcompat() {
+        // Existing minimal REST YAML (url only) must still parse with all
+        // optional fields defaulting to None.
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: https://api.example.com/users
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("syncs");
+        std::fs::create_dir_all(&p).unwrap();
+        let f = p.join("t.yml");
+        std::fs::write(&f, yaml_str).unwrap();
+        let cfg = SyncConfig::load(&f).unwrap();
+        match cfg.destination {
+            DestinationConfig::Rest {
+                url,
+                method,
+                headers,
+                auth,
+                body_template,
+                timeout_secs,
+                connect_timeout_secs,
+                max_response_bytes,
+                allow_http,
+                max_batch_size,
+            } => {
+                assert_eq!(url, "https://api.example.com/users");
+                assert!(method.is_none());
+                assert!(headers.is_none());
+                assert!(auth.is_none());
+                assert!(body_template.is_none());
+                assert!(timeout_secs.is_none());
+                assert!(connect_timeout_secs.is_none());
+                assert!(max_response_bytes.is_none());
+                assert!(!allow_http.unwrap_or(false));
+                assert!(max_batch_size.is_none());
+            }
+            _ => panic!("Expected Rest destination"),
+        }
+    }
+
+    #[test]
+    fn test_rest_config_full_fields_parse() {
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: https://api.example.com/users
+  method: PUT
+  headers:
+    - name: X-Trace-Id
+      value: abc
+  auth:
+    type: bearer
+    token: ""
+  body_template: '{"events": {{ rows | tojson }}}'
+  timeout_secs: 10
+  connect_timeout_secs: 5
+  max_response_bytes: 1024
+  allow_http: false
+  max_batch_size: 50
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("syncs");
+        std::fs::create_dir_all(&p).unwrap();
+        let f = p.join("t.yml");
+        std::fs::write(&f, yaml_str).unwrap();
+        let cfg = SyncConfig::load(&f).unwrap();
+        if let DestinationConfig::Rest {
+            method,
+            headers,
+            auth,
+            body_template,
+            timeout_secs,
+            connect_timeout_secs,
+            max_response_bytes,
+            allow_http,
+            max_batch_size,
+            ..
+        } = cfg.destination
+        {
+            assert_eq!(method.as_deref(), Some("PUT"));
+            assert_eq!(headers.as_ref().unwrap().len(), 1);
+            assert!(matches!(auth, Some(AuthConfig::Bearer { .. })));
+            assert!(body_template.is_some());
+            assert_eq!(timeout_secs, Some(10));
+            assert_eq!(connect_timeout_secs, Some(5));
+            assert_eq!(max_response_bytes, Some(1024));
+            assert_eq!(allow_http, Some(false));
+            assert_eq!(max_batch_size, Some(50));
+        } else {
+            panic!("Expected Rest");
+        }
+    }
+
+    #[test]
+    fn test_rest_config_rejects_http_scheme_by_default() {
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: http://localhost:8080/ingest
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("syncs");
+        std::fs::create_dir_all(&p).unwrap();
+        let f = p.join("t.yml");
+        std::fs::write(&f, yaml_str).unwrap();
+        let err = SyncConfig::load(&f).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("http") || msg.contains("allow_http"),
+            "expected http-scheme rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_rest_config_allows_http_with_flag() {
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: http://localhost:8080/ingest
+  allow_http: true
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("syncs");
+        std::fs::create_dir_all(&p).unwrap();
+        let f = p.join("t.yml");
+        std::fs::write(&f, yaml_str).unwrap();
+        let cfg = SyncConfig::load(&f).unwrap();
+        if let DestinationConfig::Rest { allow_http, .. } = cfg.destination {
+            assert_eq!(allow_http, Some(true));
+        }
+    }
+
+    #[test]
+    fn test_rest_config_rejects_bad_method() {
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: https://x.example.com
+  method: TRACE
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("syncs");
+        std::fs::create_dir_all(&p).unwrap();
+        let f = p.join("t.yml");
+        std::fs::write(&f, yaml_str).unwrap();
+        let err = SyncConfig::load(&f).unwrap_err();
+        assert!(err.to_string().contains("method"), "got: {err}");
+    }
+
+    #[test]
+    fn test_rest_config_rejects_bad_template() {
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: https://x.example.com
+  body_template: '{% for x in rows %}{{ x | tojson }}{% endif %}'
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("syncs");
+        std::fs::create_dir_all(&p).unwrap();
+        let f = p.join("t.yml");
+        std::fs::write(&f, yaml_str).unwrap();
+        let err = SyncConfig::load(&f).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("body_template") || msg.contains("minijinja"),
+            "expected template error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_rest_secrets_resolution_bearer() {
+        // secrets.toml in project dir with [destination.rest] bearer_token.
+        let dir = tempfile::tempdir().unwrap();
+        let syncs = dir.path().join("syncs");
+        std::fs::create_dir_all(&syncs).unwrap();
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: https://x.example.com
+  auth:
+    type: bearer
+    token: ""
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        std::fs::write(syncs.join("t.yml"), yaml_str).unwrap();
+
+        let secrets_path = dir.path().join("secrets.toml");
+        std::fs::write(
+            &secrets_path,
+            "[destination.rest]\nbearer_token = \"supersecret\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+
+        let cfg = SyncConfig::load(&syncs.join("t.yml")).unwrap();
+        if let DestinationConfig::Rest {
+            auth: Some(AuthConfig::Bearer { token }),
+            ..
+        } = cfg.destination
+        {
+            assert_eq!(token, "supersecret");
+        } else {
+            panic!("Expected bearer auth with resolved token");
+        }
+    }
+
+    #[test]
+    fn test_auth_config_debug_redacts_secrets() {
+        let auth = AuthConfig::Bearer {
+            token: "live-secret-token".to_string(),
+        };
+        let s = format!("{auth:?}");
+        assert!(!s.contains("live-secret-token"), "Debug leaked token: {s}");
+        assert!(s.contains("***"));
+
+        let auth = AuthConfig::Basic {
+            username: "alice".to_string(),
+            password: "p@ss".to_string(),
+        };
+        let s = format!("{auth:?}");
+        assert!(!s.contains("p@ss"));
+        assert!(s.contains("alice")); // username is not secret
+
+        let auth = AuthConfig::ApiKey {
+            header_name: "X-Api-Key".to_string(),
+            value: "val-secret".to_string(),
+        };
+        let s = format!("{auth:?}");
+        assert!(!s.contains("val-secret"));
+        assert!(s.contains("X-Api-Key"));
+    }
+
+    #[test]
+    fn test_rest_config_rejects_url_userinfo() {
+        let yaml_str = r#"
+name: t
+model:
+  sql: SELECT 1
+destination:
+  type: rest
+  url: https://user:pass@api.example.com/users
+sync:
+  mode: incremental
+  cursor_field: id
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("syncs");
+        std::fs::create_dir_all(&p).unwrap();
+        let f = p.join("t.yml");
+        std::fs::write(&f, yaml_str).unwrap();
+        let err = SyncConfig::load(&f).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("userinfo"),
+            "expected userinfo rejection, got: {msg}"
         );
     }
 }

@@ -72,11 +72,15 @@ pub struct RateLimit {
 }
 
 /// Configuration for a write operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WriteConfig {
     pub sync_name: String,
     pub batch_index: usize,
     pub total_batches: usize,
+    /// The primary key column name for the sync, if known. Destinations may
+    /// use this to extract real primary keys from the batch for `RowError`
+    /// entries so the delivery pipeline's PK-based journal dedup works.
+    pub pk_col: Option<String>,
 }
 
 /// A row entry in the journal.
