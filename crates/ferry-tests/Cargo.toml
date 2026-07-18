@@ -8,7 +8,11 @@ publish = false
 [dependencies]
 ferry-core = { path = "../ferry-core" }
 ferry-sources = { path = "../ferry-sources" }
-ferry-destinations = { path = "../ferry-destinations" }
+# Enable `test-util` so integration tests can use
+# `GoogleSheetsDestination::new_for_test` (the test-only constructor that
+# bypasses production host/HTTPS/key-file checks). Production builds do not
+# enable this feature.
+ferry-destinations = { path = "../ferry-destinations", features = ["test-util"] }
 arrow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
@@ -24,3 +28,7 @@ regex.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
+rsa.workspace = true
+# `rand 0.8` (not the workspace `rand 0.9`) because `rsa 0.9` uses
+# `rand_core 0.6`. Test-only.
+rand_08 = { package = "rand", version = "0.8" }

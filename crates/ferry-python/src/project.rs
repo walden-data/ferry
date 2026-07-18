@@ -134,12 +134,13 @@ impl Project {
                     };
 
                 // Create destination
-                let destination = match factory::create_destination(&project_dir_buf, sync_config) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        return Err(ferry_error_to_py_err(e));
-                    }
-                };
+                let destination =
+                    match rt.block_on(factory::create_destination(&project_dir_buf, sync_config)) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            return Err(ferry_error_to_py_err(e));
+                        }
+                    };
 
                 let options = RunOptions {
                     sync_names: sync_names_clone.clone(),

@@ -23,7 +23,7 @@ use ferry_core::config::{
 use ferry_core::engine::{Engine, RunOptions};
 use ferry_core::error::FerryError;
 use ferry_core::traits::{Destination, Source};
-use ferry_destinations::{FileDestination, FileFormat, MockRestDestination};
+use ferry_destinations::{FileDestination, FileFormat, MockRestDestination, ServiceAccountKeyFile};
 use ferry_sources::duckdb::DuckDbSource;
 
 // ---------------------------------------------------------------------------
@@ -287,6 +287,154 @@ pub async fn count_synced_rows(engine: &Engine, sync_name: &str) -> usize {
     // Use get_dead_rows + get_pending_rows to get non-synced, then subtract from total
     // Actually, we need to query the DB directly since get_synced_pks only returns
     // rows from incomplete runs (for crash recovery purposes).
+    let conn = engine.state().get_conn().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM row_journal WHERE sync_name = ? AND status = 'synced'",
+            duckdb::params![sync_name],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    count as usize
+}
+
+// ---------------------------------------------------------------------------
+// Google Sheets test helpers
+// ---------------------------------------------------------------------------
+
+use std::sync::OnceLock;
+
+use rsa::RsaPrivateKey;
+use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+
+/// A process-wide synthetic RSA private key in PKCS#8 PEM format, generated
+/// once on first use. This key is NOT used for any real authentication — it
+/// only satisfies yup-oauth2's signer initialization (the wiremock token
+/// endpoint ignores the JWT signature). Generating it at runtime avoids
+/// committing a PEM fixture to the repo.
+///
+/// `RSA 2048` key generation is slow in debug builds (~10s); the `OnceLock`
+/// ensures it happens at most once per test process. The `rsa` crate is a
+/// dev-dependency; production code never touches it.
+static TEST_SA_PRIVATE_KEY: OnceLock<String> = OnceLock::new();
+
+/// Return the synthetic PEM-formatted PKCS#8 private key, generating it
+/// on first call.
+fn test_sa_private_key() -> &'static str {
+    TEST_SA_PRIVATE_KEY.get_or_init(|| {
+        // Use a fixed-seed rng so tests are deterministic and do not depend
+        // on `/dev/urandom`. `rand 0.8`'s `StdRng` seeds from a constant for
+        // reproducibility. `rand 0.8` is used (not the workspace `rand 0.9`)
+        // because `rsa 0.9` depends on `rand_core 0.6`.
+        use rand_08::SeedableRng;
+        let mut rng = rand_08::rngs::StdRng::seed_from_u64(0x5F3A_1E4D_9B2C_4D7E);
+        let key = RsaPrivateKey::new(&mut rng, 2048).expect("failed to generate test RSA key");
+        let pem = key
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("failed to encode test RSA key as PKCS#8 PEM");
+        pem.as_str().to_string()
+    })
+}
+
+/// Build a fake `ServiceAccountKeyFile` whose `token_uri` points at the
+/// given wiremock server's token endpoint. The `private_key` is a synthetic
+/// RSA key (so yup-oauth2's signer can be initialized), but no real Google
+/// authentication ever happens.
+pub fn test_service_account_key(token_uri: String) -> ServiceAccountKeyFile {
+    ServiceAccountKeyFile {
+        key_type: Some("service_account".to_string()),
+        project_id: Some("test-project".to_string()),
+        private_key_id: Some("test-key-id".to_string()),
+        private_key: test_sa_private_key().to_string(),
+        client_email: "test-sa@test-project.iam.gserviceaccount.com".to_string(),
+        client_id: Some("1234567890".to_string()),
+        auth_uri: Some("https://accounts.google.com/o/oauth2/auth".to_string()),
+        token_uri,
+        auth_provider_x509_cert_url: None,
+        client_x509_cert_url: None,
+    }
+}
+
+/// Build a `DestinationConfig::GoogleSheets` for integration tests. The
+/// `service_account_key_file` is empty because tests use
+/// [`GoogleSheetsDestination::new_for_test`] rather than the production
+/// constructor.
+pub fn google_sheets_dest_config(
+    spreadsheet_id: &str,
+    sheet: &str,
+    key_column: &str,
+    max_rows: usize,
+) -> DestinationConfig {
+    DestinationConfig::GoogleSheets {
+        spreadsheet_id: spreadsheet_id.to_string(),
+        sheet: sheet.to_string(),
+        key_column: key_column.to_string(),
+        service_account_key_file: String::new(),
+        max_rows,
+        max_batch_size: Some(100),
+        timeout_secs: Some(5),
+        connect_timeout_secs: Some(2),
+        max_response_bytes: Some(1024 * 1024),
+    }
+}
+
+/// Create a `SyncConfig` for Google Sheets integration tests with
+/// `full_refresh` mode (the simplest mode that routes through `write`).
+pub fn create_google_sheets_sync_config(
+    name: &str,
+    sql: &str,
+    dest: DestinationConfig,
+) -> SyncConfig {
+    SyncConfig {
+        name: name.to_string(),
+        description: Some("Google Sheets integration test".to_string()),
+        tags: None,
+        model: ModelConfig::Sql {
+            sql: sql.to_string(),
+        },
+        destination: dest,
+        sync: SyncSettings {
+            mode: SyncMode::FullRefresh,
+            cursor_field: Some("id".to_string()),
+            cdc: None,
+            delivery: Some(DeliveryConfig {
+                batch_size: 100,
+                retry: Some(RetryConfig {
+                    max_attempts: 3,
+                    backoff: BackoffStrategy::Exponential,
+                    initial_delay_secs: 1,
+                    max_delay_secs: 5,
+                }),
+                on_reject: None,
+                dead_letter: None,
+                allow_redelivery: false,
+            }),
+            full_refresh: None,
+        },
+        tests: None,
+    }
+}
+
+/// Count rows in the journal with a given status whose `last_error` contains `needle`.
+pub fn count_journal_errors_containing(
+    engine: &Engine,
+    sync_name: &str,
+    status: &str,
+    needle: &str,
+) -> usize {
+    let conn = engine.state().get_conn().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM row_journal WHERE sync_name = ? AND status = ? AND last_error LIKE ?",
+            duckdb::params![sync_name, status, format!("%{needle}%")],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    count as usize
+}
+
+/// Count synced rows in the journal.
+pub fn count_journal_synced(engine: &Engine, sync_name: &str) -> usize {
     let conn = engine.state().get_conn().unwrap();
     let count: i64 = conn
         .query_row(

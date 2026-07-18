@@ -141,6 +141,25 @@ pub enum DestinationConfig {
         output_dir: String,
         format: Option<FileFormat>,
     },
+    /// Google Sheets v4 destination. Authenticated via a service-account
+    /// JSON key (path resolved through env vars / `secrets.toml`). Writes are
+    /// key-based upserts against explicit A1 ranges using
+    /// `spreadsheets.values.batchUpdate` with `valueInputOption=RAW`.
+    GoogleSheets {
+        spreadsheet_id: String,
+        sheet: String,
+        key_column: String,
+        service_account_key_file: String,
+        max_rows: usize,
+        #[serde(default)]
+        max_batch_size: Option<usize>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        connect_timeout_secs: Option<u64>,
+        #[serde(default)]
+        max_response_bytes: Option<usize>,
+    },
 }
 
 /// An HTTP header for REST destinations.
@@ -564,30 +583,49 @@ impl SyncConfig {
     /// destination config. Source secrets are handled at the `FerryConfig`
     /// level (`FerryConfig::resolve_secrets`).
     pub fn resolve_secrets(&mut self, secrets: &Secrets) {
-        if let DestinationConfig::Rest { auth, headers, .. } = &mut self.destination {
-            // Auth resolution
-            if let Some(auth) = auth.as_mut() {
-                resolve_auth_secrets(auth, secrets);
-            }
-            // Raw header value resolution: each header value is treated as a
-            // secret key under `destination.rest` (e.g. `header.Authorization`
-            // or simply the header name lowercased). The header value in YAML
-            // is interpreted as a key into `destination.rest`.
-            if let Some(headers) = headers.as_mut() {
-                for h in headers.iter_mut() {
-                    let key = h.value.trim();
-                    if key.is_empty() {
-                        continue;
-                    }
-                    // First try the raw key, then `header.{key}`.
-                    if let Some(v) = secrets
-                        .resolve("destination.rest", key)
-                        .or_else(|| secrets.resolve("destination.rest", &format!("header.{key}")))
-                    {
-                        h.value = v;
+        match &mut self.destination {
+            DestinationConfig::Rest { auth, headers, .. } => {
+                // Auth resolution
+                if let Some(auth) = auth.as_mut() {
+                    resolve_auth_secrets(auth, secrets);
+                }
+                // Raw header value resolution: each header value is treated as
+                // a secret key under `destination.rest` (e.g. `header.Authorization`
+                // or simply the header name lowercased). The header value in YAML
+                // is interpreted as a key into `destination.rest`.
+                if let Some(headers) = headers.as_mut() {
+                    for h in headers.iter_mut() {
+                        let key = h.value.trim();
+                        if key.is_empty() {
+                            continue;
+                        }
+                        // First try the raw key, then `header.{key}`.
+                        if let Some(v) = secrets.resolve("destination.rest", key).or_else(|| {
+                            secrets.resolve("destination.rest", &format!("header.{key}"))
+                        }) {
+                            h.value = v;
+                        }
                     }
                 }
             }
+            DestinationConfig::GoogleSheets {
+                service_account_key_file,
+                ..
+            } => {
+                // An empty `service_account_key_file` in YAML signals "resolve
+                // from secrets.toml". Direct paths and env-substituted values
+                // remain valid and are left untouched.
+                if service_account_key_file.trim().is_empty() {
+                    if let Some(v) =
+                        secrets.resolve("destination.google_sheets", "service_account_key_file")
+                    {
+                        *service_account_key_file = v;
+                    }
+                }
+            }
+            DestinationConfig::Braze { .. }
+            | DestinationConfig::Slack { .. }
+            | DestinationConfig::File { .. } => {}
         }
     }
 }

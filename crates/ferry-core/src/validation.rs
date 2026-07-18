@@ -14,6 +14,11 @@ pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// Default per-destination max batch size (100 rows).
 pub const DEFAULT_MAX_BATCH_SIZE: usize = 100;
 
+/// Maximum per-cell character count enforced by the Google Sheets API.
+pub const GOOGLE_SHEETS_MAX_CELL_CHARS: usize = 50_000;
+/// Regex pattern for a valid Google Spreadsheet ID.
+pub const GOOGLE_SHEETS_SPREADSHEET_ID_REGEX: &str = r"^[A-Za-z0-9_-]+$";
+
 /// A single validation error with context about which field and why.
 #[derive(Debug, Clone)]
 pub struct ValidationError {
@@ -348,6 +353,130 @@ pub fn validate_sync_config(config: &SyncConfig) -> Result<(), Vec<ValidationErr
                 });
             }
         }
+        DestinationConfig::GoogleSheets {
+            spreadsheet_id,
+            sheet,
+            key_column,
+            service_account_key_file,
+            max_rows,
+            max_batch_size,
+            timeout_secs,
+            connect_timeout_secs,
+            max_response_bytes,
+        } => {
+            let ctx = format!("sync:{}", config.name);
+
+            // Spreadsheet ID: required + regex.
+            if spreadsheet_id.trim().is_empty() {
+                errors.push(ValidationError {
+                    field: "destination.GoogleSheets.spreadsheet_id".to_string(),
+                    message: "Google Sheets destination spreadsheet_id must not be empty"
+                        .to_string(),
+                    context: ctx.clone(),
+                });
+            } else {
+                let re = regex::Regex::new(GOOGLE_SHEETS_SPREADSHEET_ID_REGEX)
+                    .expect("static regex is valid");
+                if !re.is_match(spreadsheet_id) {
+                    errors.push(ValidationError {
+                        field: "destination.GoogleSheets.spreadsheet_id".to_string(),
+                        message: format!(
+                            "spreadsheet_id '{spreadsheet_id}' contains characters outside [A-Za-z0-9_-]; this is unsafe for URL interpolation"
+                        ),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+
+            // Sheet/tab name.
+            if sheet.trim().is_empty() {
+                errors.push(ValidationError {
+                    field: "destination.GoogleSheets.sheet".to_string(),
+                    message: "Google Sheets destination sheet must not be empty".to_string(),
+                    context: ctx.clone(),
+                });
+            }
+
+            // Key column name.
+            if key_column.trim().is_empty() {
+                errors.push(ValidationError {
+                    field: "destination.GoogleSheets.key_column".to_string(),
+                    message: "Google Sheets destination key_column must not be empty".to_string(),
+                    context: ctx.clone(),
+                });
+            }
+
+            // Credential file path. Resolution from secrets.toml happens in
+            // `SyncConfig::resolve_secrets` (after env-substitution). At
+            // validation time the field may still be empty if a `secrets.toml`
+            // resolution was not performed (e.g. loading `SyncConfig` directly
+            // without a secrets file). We surface an empty path as an error so
+            // operators do not discover this at first write.
+            if service_account_key_file.trim().is_empty() {
+                errors.push(ValidationError {
+                    field: "destination.GoogleSheets.service_account_key_file".to_string(),
+                    message: "Google Sheets destination service_account_key_file must not be empty (set it directly, via env var, or in [destination.google_sheets] of secrets.toml)".to_string(),
+                    context: ctx.clone(),
+                });
+            }
+
+            // max_rows: row 1 is the header, so at least 2 rows are required
+            // for any data write to be possible.
+            if *max_rows < 2 {
+                errors.push(ValidationError {
+                    field: "destination.GoogleSheets.max_rows".to_string(),
+                    message: "max_rows must be at least 2 (one header row + one data row)"
+                        .to_string(),
+                    context: ctx.clone(),
+                });
+            }
+
+            if let Some(m) = max_batch_size {
+                if *m == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.GoogleSheets.max_batch_size".to_string(),
+                        message: "max_batch_size must be at least 1".to_string(),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+
+            if let Some(t) = timeout_secs {
+                if *t == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.GoogleSheets.timeout_secs".to_string(),
+                        message: "timeout_secs must be greater than 0".to_string(),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+            if let Some(t) = connect_timeout_secs {
+                if *t == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.GoogleSheets.connect_timeout_secs".to_string(),
+                        message: "connect_timeout_secs must be greater than 0".to_string(),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+            if let Some(m) = max_response_bytes {
+                if *m == 0 {
+                    errors.push(ValidationError {
+                        field: "destination.GoogleSheets.max_response_bytes".to_string(),
+                        message: "max_response_bytes must be greater than 0".to_string(),
+                        context: ctx.clone(),
+                    });
+                } else if *m > MAX_RESPONSE_BYTES_CAP {
+                    errors.push(ValidationError {
+                        field: "destination.GoogleSheets.max_response_bytes".to_string(),
+                        message: format!(
+                            "max_response_bytes ({m}) exceeds the maximum allowed cap of {MAX_RESPONSE_BYTES_CAP} bytes"
+                        ),
+                        context: ctx.clone(),
+                    });
+                }
+            }
+        }
     }
 
     // Validate sync settings
@@ -403,7 +532,20 @@ pub fn validate_sync_config(config: &SyncConfig) -> Result<(), Vec<ValidationErr
             // Full refresh doesn't require CDC config
         }
         SyncMode::Mirror => {
-            // Mirror mode doesn't require CDC config
+            // Mirror mode doesn't require CDC config. However, the Google
+            // Sheets destination does not implement `replace_all` (it is a
+            // key-based upsert only) and `RemoveCapability::None`, so mirror
+            // dispatch would either call an unsupported `replace_all` or fall
+            // back to `write` while leaving target-only rows untouched —
+            // contradicting the user-visible mirror contract. Reject mirror
+            // mode for Google Sheets destinations at validation time.
+            if matches!(config.destination, DestinationConfig::GoogleSheets { .. }) {
+                errors.push(ValidationError {
+                    field: "sync.mode".to_string(),
+                    message: "Google Sheets destination does not support mirror mode (it is key-based upsert only with no remove/replace_all capability); use incremental or full_refresh".to_string(),
+                    context: format!("sync:{}", config.name),
+                });
+            }
         }
     }
 

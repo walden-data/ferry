@@ -8,7 +8,7 @@ use ferry_core::engine::{Engine, RunOptions, SyncResult};
 use ferry_core::error::FerryError;
 use ferry_core::state::DuckDbStateStore;
 use ferry_core::traits::{Destination, Source, StateStore};
-use ferry_destinations::{FileDestination, RestDestination};
+use ferry_destinations::{FileDestination, GoogleSheetsDestination, RestDestination};
 use ferry_sources::duckdb::DuckDbSource;
 use ferry_sources::postgres::PostgresSource;
 
@@ -324,7 +324,7 @@ async fn cmd_run(args: RunArgs) -> Result<(), FerryError> {
         let source = create_source_from_config(project_dir, sync_config).await?;
 
         // Create destination
-        let destination = create_destination_from_config(project_dir, sync_config)?;
+        let destination = create_destination_from_config(project_dir, sync_config).await?;
 
         let options = RunOptions {
             sync_names: Some(vec![sync_config.name.clone()]),
@@ -403,7 +403,7 @@ async fn cmd_validate() -> Result<(), FerryError> {
         }
 
         // Test destination connections
-        match create_destination_from_config(project_dir, sync_config) {
+        match create_destination_from_config(project_dir, sync_config).await {
             Ok(dest) => match dest.check_connection().await {
                 Ok(()) => {
                     println!(
@@ -703,7 +703,7 @@ async fn create_source_from_config(
 }
 
 /// Create a destination connector from a sync config.
-fn create_destination_from_config(
+async fn create_destination_from_config(
     project_dir: &Path,
     sync_config: &SyncConfig,
 ) -> Result<Box<dyn Destination>, FerryError> {
@@ -726,6 +726,22 @@ fn create_destination_from_config(
         }
         DestinationConfig::Rest { .. } => {
             let dest = RestDestination::new(&sync_config.destination, &sync_config.name)?;
+            Ok(Box::new(dest))
+        }
+        DestinationConfig::GoogleSheets {
+            service_account_key_file,
+            ..
+        } => {
+            // Resolve a relative credential path against the project
+            // directory before constructing the destination. Absolute paths
+            // and env-substituted paths are left untouched.
+            let _ = service_account_key_file; // canonicalization happens inside `new`.
+            let dest = GoogleSheetsDestination::new(
+                &sync_config.destination,
+                project_dir,
+                &sync_config.name,
+            )
+            .await?;
             Ok(Box::new(dest))
         }
         DestinationConfig::Braze { .. } => Err(FerryError::Config(

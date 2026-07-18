@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use ferry_core::config::{DestinationConfig, FerryConfig, FileFormat, SourceConfig, SyncConfig};
 use ferry_core::error::FerryError;
 use ferry_core::traits::{Destination, Source};
-use ferry_destinations::{FileDestination, RestDestination};
+use ferry_destinations::{FileDestination, GoogleSheetsDestination, RestDestination};
 use ferry_sources::duckdb::DuckDbSource;
 use ferry_sources::postgres::PostgresSource;
 
@@ -44,7 +44,11 @@ pub async fn create_source(
 }
 
 /// Create a destination connector from a sync config.
-pub fn create_destination(
+///
+/// This is async because the Google Sheets destination constructs a
+/// `ServiceAccountAuthenticator` (which reads the credential file and builds
+/// a hyper-rustls HTTP client) at construction time.
+pub async fn create_destination(
     project_dir: &Path,
     sync_config: &SyncConfig,
 ) -> Result<Box<dyn Destination>, FerryError> {
@@ -67,6 +71,18 @@ pub fn create_destination(
         }
         DestinationConfig::Rest { .. } => {
             let dest = RestDestination::new(&sync_config.destination, &sync_config.name)?;
+            Ok(Box::new(dest))
+        }
+        DestinationConfig::GoogleSheets { .. } => {
+            // Relative credential path resolution happens inside
+            // `GoogleSheetsDestination::new` (canonicalized against
+            // `project_dir`).
+            let dest = GoogleSheetsDestination::new(
+                &sync_config.destination,
+                project_dir,
+                &sync_config.name,
+            )
+            .await?;
             Ok(Box::new(dest))
         }
         DestinationConfig::Braze { .. } => Err(FerryError::Config(

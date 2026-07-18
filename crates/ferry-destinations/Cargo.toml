@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# `test-util` enables the `GoogleSheetsDestination::new_for_test`
+# constructor, which bypasses production-only host/HTTPS/key-file checks so
+# integration tests can point at a wiremock server. Production builds must
+# never enable this feature — it is a deliberate security escape hatch.
+# `ferry-tests` enables it as a dev-dependency.
+test-util = []
+
 [dependencies]
 ferry-core = { path = "../ferry-core" }
 arrow.workspace = true
@@ -26,6 +34,9 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+yup-oauth2.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
