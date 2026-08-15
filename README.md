@@ -15,6 +15,8 @@ pip install ferry-core          # core engine (DuckDB included)
 ferry init && ferry run
 ```
 
+> **Naming:** the PyPI distribution is `ferry-core`, but the Python import is `ferry` and the compiled extension is `ferry._native`. `pip install ferry-core` provides `import ferry`.
+
 ## Why ferry?
 
 | Problem | ferry's answer |

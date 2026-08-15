@@ -4,7 +4,36 @@ build-backend = "maturin"
 
 [project]
 name = "ferry-core"
+dynamic = ["version"]
+description = "Rust-native reverse ETL engine with Python bindings. Sync warehouse data to every tool, durably."
+readme = "../../README.md"
+license = { text = "MIT" }
 requires-python = ">=3.9"
+keywords = ["reverse-etl", "etl", "data-engineering", "arrow", "rust", "duckdb"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/walden-data/ferry"
+Repository = "https://github.com/walden-data/ferry"
+Documentation = "https://github.com/walden-data/ferry#readme"
+Issues = "https://github.com/walden-data/ferry/issues"
+Changelog = "https://github.com/walden-data/ferry/releases"
 
 [tool.maturin]
 module-name = "ferry._native"
