@@ -30,3 +30,5 @@ Thumbs.db
 .env
 .env.local
 secrets.toml
+words-for-humans-report.txt
+.words-for-humans/
