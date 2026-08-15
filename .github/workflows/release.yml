@@ -47,7 +47,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build and validate only (do not publish to TestPyPI)"
+        description: "Build and validate only. Do not publish to TestPyPI."
         required: false
         type: boolean
         default: true
@@ -55,7 +55,7 @@ on:
     tags:
       - "v*"
 
-# Default permissions are least-privilege. Publish jobs override with
+# Default permissions are least-privilege. Publish jobs grant id-token: write
 # id-token: write at the job level for OIDC Trusted Publishing.
 permissions:
   contents: read
@@ -187,13 +187,10 @@ jobs:
 
   # ---------------------------------------------------------------------
   # Validation: run before any publication. Downloads every build
-  # artifact into a separate named directory, validates metadata,
-  # contents, version consistency, and the exact expected distribution
-  # matrix. Computes a SHA-256 manifest of the approved artifact set.
-  # Uploads a single immutable `validated-dists` artifact containing
-  # only the allowlisted files plus the manifest. Publish jobs verify
-  # the manifest before uploading, cryptographically binding the
-  # validated bytes to the published bytes.
+  # artifact into a separate directory. Validates metadata, contents,
+  # version consistency, and the exact expected distribution matrix.
+  # Computes a SHA-256 manifest and uploads an immutable `validated-dists`
+  # artifact. Publish jobs verify the manifest before uploading.
   # ---------------------------------------------------------------------
   validate:
     name: Validate artifacts
@@ -257,7 +254,7 @@ jobs:
           cargo_toml = Path("Cargo.toml").read_text()
           m = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml, re.MULTILINE)
           if not m:
-              print("Could not find workspace version in Cargo.toml", file=sys.stderr)
+              print("Could not find the workspace version in Cargo.toml", file=sys.stderr)
               sys.exit(1)
           cargo_version = m.group(1)
           expected_version = Version(cargo_version)
@@ -277,7 +274,7 @@ jobs:
           # 6 CPython versions × 4 platform/arch combos = 24 wheels + 1 sdist.
           # Each expected wheel cell is a canonical key:
           #   (interpreter, abi, platform_family, architecture)
-          # platform_family is "linux" or "macosx"; architecture is the
+          # The platform_family is "linux" or "macosx"; the architecture is
           # exact string "x86_64" or "arm64"/"aarch64". Linux requires
           # the exact manylinux_2_28 policy; musllinux, other manylinux
           # versions, and native linux tags are rejected. macOS
@@ -299,13 +296,13 @@ jobs:
           expected_sdist_count = 1
           expected_total = expected_wheel_count + expected_sdist_count  # 25
 
-          # Exact Linux platform patterns: only manylinux_2_28 is
-          # accepted for each architecture. musllinux, older/different
-          # manylinux policies, and native linux tags are rejected.
+          # Exact Linux platform patterns. Only manylinux_2_28 is
+          # accepted; musllinux, older/different manylinux policies,
+          # and native linux tags are rejected.
           linux_x86_64_re = re.compile(r'^manylinux_2_28_x86_64$')
           linux_aarch64_re = re.compile(r'^manylinux_2_28_aarch64$')
           # macOS platform pattern: deployment target version varies
-          # by runner/SDK; we normalize it away but require a valid
+          # by runner/SDK. We normalize it away but require a valid
           # version + exact architecture.
           macos_re = re.compile(r'^macosx_[0-9]+_[0-9]+_(x86_64|arm64)$')
 
