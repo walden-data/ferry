@@ -12,6 +12,9 @@ dist/
 build/
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+.pyright_cache/
 
 # Ferry state
 .ferry/
