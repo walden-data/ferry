@@ -189,8 +189,7 @@ jobs:
   # Validation: run before any publication. Downloads every build
   # artifact into a separate directory. Validates metadata, contents,
   # version consistency, and the exact expected distribution matrix.
-  # Computes a SHA-256 manifest and uploads an immutable `validated-dists`
-  # artifact. Publish jobs verify the manifest before uploading.
+  # Computes a SHA-256 manifest. Publish jobs verify the manifest.
   # ---------------------------------------------------------------------
   validate:
     name: Validate artifacts
