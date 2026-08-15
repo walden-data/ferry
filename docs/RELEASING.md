@@ -18,7 +18,7 @@ stored in the repository.
 | Linux aarch64 | `aarch64-unknown-linux-gnu` | `manylinux_2_28_aarch64` |
 | macOS x86_64 | `x86_64-apple-darwin` | `macos_*_x86_64` |
 | macOS arm64 | `aarch64-apple-darwin` | `macos_*_arm64` |
-| Source | — | `sdist` |
+| Source | : | `sdist` |
 
 Wheels are built per-CPython-version (3.9–3.14). Windows and musllinux
 wheels are out of scope for this workflow.
@@ -134,7 +134,7 @@ python -c "import ferry; import ferry._native; print(ferry.__version__)"
 
 > **Future dependencies:** if `ferry-core` later gains Python runtime
 > dependencies, do **not** use `--index-strategy unsafe-best-match` or
-> `--extra-index-url` with TestPyPI — that allows any package on either
+> `--extra-index-url` with TestPyPI: that allows any package on either
 > index to shadow the intended source (dependency confusion). Instead,
 > install `ferry-core` from TestPyPI with `--no-deps`, fetch its expected
 > SHA-256 from the workflow logs, verify it, and install dependencies
@@ -150,7 +150,7 @@ git push origin v<VERSION>
 ```
 
 The `v*` tag **push** triggers the workflow. A manual `workflow_dispatch`
-against a tag ref cannot trigger production publication — every production
+against a tag ref cannot trigger production publication : every production
 job also requires `github.event_name == 'push'`.
 
 The `pypi` environment requires an independent reviewer to approve
