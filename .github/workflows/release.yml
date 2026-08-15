@@ -10,24 +10,28 @@ name: Release
 #   dispatch against a tag ref cannot trigger production publication
 #   because every production job also requires
 #   `github.event_name == 'push'`.
+#
 # - Separate `testpypi` and `pypi` GitHub environments with job-level
 #   OIDC (Trusted Publishing). No long-lived API tokens are used.
 # - The `pypi` environment MUST have a required independent reviewer,
-#  prevent self-review, disable admin bypass, and restrict deployments
-#  to protected `v*` tags. The repository MUST have a protected `main`
-#  branch ruleset and a protected `v*` tag ruleset before any production
-#  release. See docs/RELEASING.md.
+#   prevent self-review, disable admin bypass, and restrict deployments
+#   to protected `v*` tags. The repository MUST have a protected `main`
+#   branch ruleset and a protected `v*` tag ruleset before any production
+#   release. See docs/RELEASING.md.
+#
 # - A validation job checks strict metadata, wheel contents, version
-#   consistency (tag/Cargo/Python), enforces the exact expected
+#   consistency (tag/Cargo/Python), and enforces the exact expected
 #   distribution matrix (all supported Python 3.9-3.14 wheels for each
-#   documented Linux/macOS architecture plus exactly one sdist),
-#   computes a SHA-256 manifest of the approved artifact set, and runs
+#   documented Linux/macOS architecture plus exactly one sdist). It
+#   computes a SHA-256 manifest of the approved artifact set and runs
 #   a clean-environment import smoke test before any publication.
+#
 # - Publish jobs verify the manifest and enforce that the directory
-#   contains exactly the manifest subjects before uploading,
-#   cryptographically binding the validated bytes to the published
+#   contains exactly the manifest subjects before uploading. This
+#   cryptographically binds the validated bytes to the published
 #   bytes. Production publish also verifies the tagged commit is
 #   reachable from origin/main.
+#
 # - PEP 740 digital attestations are generated and uploaded by the
 #   official PyPA publishing action for both PyPI and TestPyPI.
 # - Post-PyPI verification installs the exact released version from PyPI
@@ -87,7 +91,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      # docker/setup-qemu-action v4.2.0 — needed for non-x86_64 Linux
+      # docker/setup-qemu-action v4.2.0: needed for non-x86_64 Linux
       # cross-compilation in the manylinux container.
       - name: Set up QEMU
         if: matrix.needs-qemu
@@ -185,8 +189,8 @@ jobs:
   # Validation: run before any publication. Downloads every build
   # artifact into a separate named directory, validates metadata,
   # contents, version consistency, and the exact expected distribution
-  # matrix, computes a SHA-256 manifest of the approved artifact set,
-  # and uploads a single immutable `validated-dists` artifact containing
+  # matrix. Computes a SHA-256 manifest of the approved artifact set.
+  # Uploads a single immutable `validated-dists` artifact containing
   # only the allowlisted files plus the manifest. Publish jobs verify
   # the manifest before uploading, cryptographically binding the
   # validated bytes to the published bytes.
@@ -278,9 +282,10 @@ jobs:
           # the exact manylinux_2_28 policy; musllinux, other manylinux
           # versions, and native linux tags are rejected. macOS
           # deployment-target versions are normalized away (e.g.
-          # macosx_11_0_arm64 → ("macosx", "arm64")) so duplicate
-          # logical cells with different deployment targets cannot
-          # satisfy the count while omitting a required architecture.
+          # macosx_11_0_arm64 becomes ("macosx", "arm64")). This prevents
+          # duplicate logical cells with different deployment targets
+          # from satisfying the count while omitting a required
+          # architecture.
           py_versions = ["39", "310", "311", "312", "313", "314"]
           expected_cells = set()
           for py in py_versions:
@@ -294,12 +299,12 @@ jobs:
           expected_sdist_count = 1
           expected_total = expected_wheel_count + expected_sdist_count  # 25
 
-          # Exact Linux platform patterns — only manylinux_2_28 is
+          # Exact Linux platform patterns: only manylinux_2_28 is
           # accepted for each architecture. musllinux, older/different
           # manylinux policies, and native linux tags are rejected.
           linux_x86_64_re = re.compile(r'^manylinux_2_28_x86_64$')
           linux_aarch64_re = re.compile(r'^manylinux_2_28_aarch64$')
-          # macOS platform pattern — deployment target version varies
+          # macOS platform pattern: deployment target version varies
           # by runner/SDK; we normalize it away but require a valid
           # version + exact architecture.
           macos_re = re.compile(r'^macosx_[0-9]+_[0-9]+_(x86_64|arm64)$')
@@ -386,7 +391,7 @@ jobs:
                       sys.exit(1)
                   seen_cells.add(cell)
 
-                  # Parse METADATA — require exactly one METADATA entry.
+                  # Parse METADATA: require exactly one METADATA entry.
                   with zipfile.ZipFile(fpath) as z:
                       meta_names = [n for n in z.namelist()
                                     if n.endswith(".dist-info/METADATA")]
@@ -413,7 +418,7 @@ jobs:
                           print(f"No ferry._native shared library in {basename}", file=sys.stderr)
                           sys.exit(1)
 
-                      # Mandatory __version__ check — must parse and match.
+                       # Mandatory __version__ check: must parse and match.
                       init_names = [n for n in names_in_wheel if n == "ferry/__init__.py"]
                       if not init_names:
                           print(f"Missing ferry/__init__.py in {basename}", file=sys.stderr)
@@ -541,7 +546,7 @@ jobs:
         run: |
           uv venv verify-env
           source verify-env/bin/activate
-          # Install the Linux x86_64 cp312 wheel specifically — we are
+          # Install the Linux x86_64 cp312 wheel specifically: we are
           # on ubuntu-latest with setup-python 3.12. The glob is
           # narrowly scoped to avoid matching macOS x86_64 wheels.
           uv pip install dist-final/*cp312*manylinux_2_28_x86_64.whl
@@ -591,7 +596,7 @@ jobs:
           # Verify every file in the manifest is present and unmodified.
           sha256sum -c SHA256SUMS
           # Fail-closed: the directory must contain exactly the manifest
-          # subjects plus the manifest itself — no extra files.
+          # subjects plus the manifest itself. No extra files.
           manifest_files=$(awk '{print $2}' SHA256SUMS | sort)
           dir_files=$(for f in *; do [ -f "$f" ] && [ "$f" != "SHA256SUMS" ] && echo "$f"; done | sort)
           if [ "$manifest_files" != "$dir_files" ]; then
@@ -603,7 +608,7 @@ jobs:
             exit 1
           fi
           rm SHA256SUMS
-      # pypa/gh-action-pypi-publish v1.14.2 — generates PEP 740
+      # pypa/gh-action-pypi-publish v1.14.2: generates PEP 740
       # attestations by default for Trusted Publishing flows.
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
@@ -630,7 +635,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      # actions/checkout v7.0.1 — fetch full history for ancestry check.
+      # actions/checkout v7.0.1: fetch full history for ancestry check.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -659,7 +664,7 @@ jobs:
           # Verify every file in the manifest is present and unmodified.
           sha256sum -c SHA256SUMS
           # Fail-closed: the directory must contain exactly the manifest
-          # subjects plus the manifest itself — no extra files.
+          # subjects plus the manifest itself. No extra files.
           manifest_files=$(awk '{print $2}' SHA256SUMS | sort)
           dir_files=$(for f in *; do [ -f "$f" ] && [ "$f" != "SHA256SUMS" ] && echo "$f"; done | sort)
           if [ "$manifest_files" != "$dir_files" ]; then
@@ -671,7 +676,7 @@ jobs:
             exit 1
           fi
           rm SHA256SUMS
-      # pypa/gh-action-pypi-publish v1.14.2 — generates PEP 740
+      # pypa/gh-action-pypi-publish v1.14.2: generates PEP 740
       # attestations by default for Trusted Publishing flows.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
