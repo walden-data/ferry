@@ -7,7 +7,7 @@ This document describes the secure, repeatable release process for the
 
 The release workflow lives in [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 It builds wheels and an sdist once, validates them, and publishes them
-through GitHub Trusted Publishing (OIDC) — no long-lived API tokens are
+through GitHub Trusted Publishing (OIDC). No long-lived API tokens are
 stored in the repository.
 
 ## Supported targets
@@ -45,12 +45,12 @@ all of them are in place.
 Create two environments in the repository settings
 (**Settings → Environments**):
 
-- `testpypi` — no required reviewer (used for manual dry runs).
-- `pypi` — **required**: add a required independent reviewer, prevent
+- `testpypi`: no required reviewer (used for manual dry runs).
+- `pypi`: **required**: add a required independent reviewer, prevent
   self-review, and disable admin bypass (or limit it to a narrow
   release role). Configure the environment's **Deployment branches and
   tags** rule: select **Selected branches and tags**, then add a **Tag**
-  rule with the pattern `v*`. Do **not** select "All tagged refs" —
+  rule with the pattern `v*`. Do **not** select "All tagged refs".
   that would allow non-`v*` tags to trigger production deployments.
   Only `v*` tags must be permitted. This ensures deployments can only
   originate from release tags, not arbitrary branch pushes or
@@ -97,7 +97,7 @@ Together these ensure that only reviewed code can reach `main`, and only
 designated maintainers can tag a release. The workflow additionally
 verifies at publish time that the tagged commit is an ancestor of
 `origin/main` (see the ancestry check in `publish-pypi`). Tag protection
-alone does not prove commit ancestry or prior code review — the
+alone does not prove commit ancestry or prior code review. The
 combination of branch protection, tag protection, and the workflow's
 ancestry check closes this gap.
 
@@ -120,7 +120,7 @@ Trigger the **Release** workflow manually
 builds, validates, and publishes to TestPyPI only.
 
 `ferry-core` currently has **no Python runtime dependencies**, so
-verification from TestPyPI is safe and simple — install with `--no-deps`
+verification from TestPyPI is safe and simple. Install with `--no-deps`
 to avoid any dependency-resolution against TestPyPI:
 
 ```bash
@@ -189,7 +189,7 @@ If you need CLI-based attestation verification and the
 `pypi-attestations` tooling (or an equivalent Sigstore `cosign`
 verification flow) is available in your environment, use it to verify
 the attestation signature against this repository's identity. Otherwise,
-rely on the PyPI provenance UI or Integrity API above. Note that pip's
+rely on the PyPI provenance UI or Integrity API above. pip's
 `--require-hashes` option verifies file hashes but does **not** verify
 PEP 740 attestations or Trusted Publisher identity.
 
