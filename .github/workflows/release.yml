@@ -1,0 +1,729 @@
+name: Release
+
+# Secure release workflow for the `ferry-core` Python distribution.
+#
+# - Build once (Linux x86_64/aarch64 manylinux_2_28, macOS x86_64/arm64
+#   thin wheels for CPython 3.9-3.14, sdist) and promote immutable
+#   artifacts into publish jobs.
+# - Manual `workflow_dispatch` publishes to TestPyPI only.
+# - `v*` tag *push* events publish to production PyPI only. A manual
+#   dispatch against a tag ref cannot trigger production publication
+#   because every production job also requires
+#   `github.event_name == 'push'`.
+#
+# - Separate `testpypi` and `pypi` GitHub environments with job-level
+#   OIDC (Trusted Publishing). No long-lived API tokens are used.
+# - The `pypi` environment MUST have a required independent reviewer,
+#   prevent self-review, disable admin bypass, and restrict deployments
+#   to protected `v*` tags. The repository MUST have a protected `main`
+#   branch ruleset and a protected `v*` tag ruleset before any production
+#   release. See docs/RELEASING.md.
+#
+# - A validation job checks strict metadata, wheel contents, version
+#   consistency (tag/Cargo/Python), and enforces the exact expected
+#   distribution matrix (all supported Python 3.9-3.14 wheels for each
+#   documented Linux/macOS architecture plus exactly one sdist). It
+#   computes a SHA-256 manifest of the approved artifact set and runs
+#   a clean-environment import smoke test before any publication.
+#
+# - Publish jobs verify the manifest and enforce that the directory
+#   contains exactly the manifest subjects before uploading. This
+#   cryptographically binds the validated bytes to the published
+#   bytes. Production publish also verifies the tagged commit is
+#   reachable from origin/main.
+#
+# - PEP 740 digital attestations are generated and uploaded by the
+#   official PyPA publishing action for both PyPI and TestPyPI.
+# - Post-PyPI verification installs the exact released version from PyPI
+#   and imports the real package.
+#
+# All third-party actions are pinned to immutable commit SHAs with
+# human-readable version comments. Update them deliberately via a
+# reviewed PR.
+#
+# Required external setup is documented in docs/RELEASING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and validate only. Do not publish to TestPyPI."
+        required: false
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+# Default permissions are least-privilege. Publish jobs grant id-token: write
+# id-token: write at the job level for OIDC Trusted Publishing.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Pin uv to an exact reviewed version.
+  UV_VERSION: "0.12.5"
+  MATURIN_VERSION: "1.14.1"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build jobs: produce immutable wheels + sdist once.
+  # ---------------------------------------------------------------------
+  build-linux:
+    name: Build Linux ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            needs-qemu: false
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            needs-qemu: true
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # docker/setup-qemu-action v4.2.0: needed for non-x86_64 Linux
+      # cross-compilation in the manylinux container.
+      - name: Set up QEMU
+        if: matrix.needs-qemu
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      # PyO3/maturin-action v1.51.0
+      - name: Build wheels (manylinux_2_28)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          version: ${{ env.MATURIN_VERSION }}
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --find-interpreter --compatibility manylinux_2_28
+          manylinux: 2_28
+          sccache: true
+      # actions/upload-artifact v4.6.2
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: Build macOS ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            arch: x86_64
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            arch: arm64
+            runner: macos-latest
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # Set up every declared Python version so --find-interpreter
+      # discovers CPython 3.9-3.14 and produces a wheel for each.
+      # actions/setup-python v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+      # PyO3/maturin-action v1.51.0
+      - name: Build wheels (thin per-architecture)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          version: ${{ env.MATURIN_VERSION }}
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --find-interpreter
+          sccache: true
+      # actions/upload-artifact v4.6.2
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-macos-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # PyO3/maturin-action v1.51.0
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          version: ${{ env.MATURIN_VERSION }}
+          command: sdist
+          args: --out dist
+      # actions/upload-artifact v4.6.2
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-sdist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Validation: run before any publication. Downloads every build
+  # artifact into a separate directory. Validates metadata, contents,
+  # version consistency, and the exact expected distribution matrix.
+  # Computes a SHA-256 manifest. Publish jobs verify the manifest.
+  # ---------------------------------------------------------------------
+  validate:
+    name: Validate artifacts
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos, build-sdist]
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # actions/setup-python v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # astral-sh/setup-uv v10.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      # Download each named artifact into a separate directory so we
+      # can reject duplicate basenames and control the allowlist.
+      - name: Download Linux x86_64 wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wheels-linux-x86_64
+          path: dist/wheels-linux-x86_64
+      - name: Download Linux aarch64 wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wheels-linux-aarch64
+          path: dist/wheels-linux-aarch64
+      - name: Download macOS x86_64 wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wheels-macos-x86_64
+          path: dist/wheels-macos-x86_64
+      - name: Download macOS arm64 wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wheels-macos-arm64
+          path: dist/wheels-macos-arm64
+      - name: Download sdist
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wheels-sdist
+          path: dist/wheels-sdist
+
+      - name: List downloaded artifacts
+        run: find dist -type f | sort
+
+      - name: Strict metadata and artifact validation
+        run: |
+          uv pip install --system "twine==7.0.0" "packaging==25.0"
+          python - <<'PY'
+          import glob, hashlib, os, re, shutil, sys, tarfile, zipfile
+          from pathlib import Path
+          from packaging.utils import canonicalize_name, parse_wheel_filename, parse_sdist_filename
+          from packaging.version import Version
+
+          # ---- Determine the expected version ----------------------------
+          cargo_toml = Path("Cargo.toml").read_text()
+          m = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml, re.MULTILINE)
+          if not m:
+              print("Could not find the workspace version in Cargo.toml", file=sys.stderr)
+              sys.exit(1)
+          cargo_version = m.group(1)
+          expected_version = Version(cargo_version)
+          expected_name = canonicalize_name("ferry-core")
+
+          ref = os.environ.get("GITHUB_REF", "")
+          tag_version = ref[len("refs/tags/v"):] if ref.startswith("refs/tags/v") else None
+          if tag_version is not None:
+              if tag_version != cargo_version:
+                  print(f"MISMATCH: tag {tag_version} != Cargo {cargo_version}", file=sys.stderr)
+                  sys.exit(1)
+              if Version(tag_version) != expected_version:
+                  print(f"MISMATCH: tag {tag_version} normalizes to {Version(tag_version)} != {expected_version}", file=sys.stderr)
+                  sys.exit(1)
+
+          # ---- Define the exact expected distribution matrix -------------
+          # 6 CPython versions × 4 platform/arch combos = 24 wheels + 1 sdist.
+          # Each expected wheel cell is a canonical key:
+          #   (interpreter, abi, platform_family, architecture)
+          # The platform_family is "linux" or "macosx"; the architecture is
+          # exact string "x86_64" or "arm64"/"aarch64". Linux requires
+          # the exact manylinux_2_28 policy; musllinux, other manylinux
+          # versions, and native linux tags are rejected. macOS
+          # deployment-target versions are normalized away (e.g.
+          # macosx_11_0_arm64 becomes ("macosx", "arm64")). This prevents
+          # duplicate logical cells with different deployment targets
+          # from satisfying the count while omitting a required
+          # architecture.
+          py_versions = ["39", "310", "311", "312", "313", "314"]
+          expected_cells = set()
+          for py in py_versions:
+              interp = f"cp{py}"
+              abi = f"cp{py}"
+              expected_cells.add((interp, abi, "linux", "x86_64"))
+              expected_cells.add((interp, abi, "linux", "aarch64"))
+              expected_cells.add((interp, abi, "macosx", "x86_64"))
+              expected_cells.add((interp, abi, "macosx", "arm64"))
+          expected_wheel_count = len(expected_cells)  # 24
+          expected_sdist_count = 1
+          expected_total = expected_wheel_count + expected_sdist_count  # 25
+
+          # Exact Linux platform patterns. Only manylinux_2_28 is
+          # accepted; musllinux, older/different manylinux policies,
+          # and native linux tags are rejected.
+          linux_x86_64_re = re.compile(r'^manylinux_2_28_x86_64$')
+          linux_aarch64_re = re.compile(r'^manylinux_2_28_aarch64$')
+          # macOS platform pattern: deployment target version varies
+          # by runner/SDK. We normalize it away but require a valid
+          # version + exact architecture.
+          macos_re = re.compile(r'^macosx_[0-9]+_[0-9]+_(x86_64|arm64)$')
+
+          def canonicalize_platform(platform):
+              """Normalize a wheel platform tag to (family, arch).
+
+              Linux: accept only manylinux_2_28_x86_64 or
+              manylinux_2_28_aarch64 (exact match). Reject musllinux,
+              other manylinux versions, and native linux tags.
+
+              macOS: accept macosx_<ver>_<ver>_(x86_64|arm64) and
+              normalize away the deployment target version.
+
+              Returns (family, arch) or None if the platform is not
+              accepted.
+              """
+              if linux_x86_64_re.match(platform):
+                  return ("linux", "x86_64")
+              if linux_aarch64_re.match(platform):
+                  return ("linux", "aarch64")
+              m = macos_re.match(platform)
+              if m:
+                  return ("macosx", m.group(1))
+              return None
+
+          # ---- Collect all distribution files ----------------------------
+          all_files = sorted(glob.glob("dist/**/*.whl", recursive=True)
+                             + glob.glob("dist/**/*.tar.gz", recursive=True))
+          if not all_files:
+              print("No distribution files found", file=sys.stderr)
+              sys.exit(1)
+
+          # Reject duplicate basenames (merge ambiguity guard).
+          basenames = [Path(f).name for f in all_files]
+          if len(basenames) != len(set(basenames)):
+              dups = sorted({b for b in basenames if basenames.count(b) > 1})
+              print(f"Duplicate basenames: {dups}", file=sys.stderr)
+              sys.exit(1)
+
+          # Reject leading-dash names (option-injection guard).
+          for b in basenames:
+              if b.startswith("-"):
+                  print(f"Leading-dash filename: {b}", file=sys.stderr)
+                  sys.exit(1)
+
+          # ---- Validate each distribution and build the seen-cell set ----
+          seen_cells = set()
+          seen_sdist = False
+          versions = set()
+          names = set()
+
+          for fpath in all_files:
+              basename = Path(fpath).name
+
+              if basename.endswith(".whl"):
+                  # Parse the wheel filename to get name, version, tags.
+                  wname, wver, wbuild, wtags = parse_wheel_filename(basename)
+                  wname = canonicalize_name(wname)
+                  wver = Version(str(wver))
+
+                  # Exactly one tag per wheel (thin per-arch, not universal2).
+                  if len(wtags) != 1:
+                      print(f"Expected exactly 1 wheel tag in {basename}, got {len(wtags)}: {wtags}", file=sys.stderr)
+                      sys.exit(1)
+                  tag = next(iter(wtags))
+
+                  # Normalize to canonical cell key.
+                  canon = canonicalize_platform(tag.platform)
+                  if canon is None:
+                      print(f"Unsupported platform tag '{tag.platform}' in {basename}", file=sys.stderr)
+                      sys.exit(1)
+                  cell = (tag.interpreter, tag.abi, canon[0], canon[1])
+
+                  # Reject cells not in the expected matrix.
+                  if cell not in expected_cells:
+                      print(f"Unexpected wheel cell {cell} in {basename}", file=sys.stderr)
+                      sys.exit(1)
+
+                  # Reject duplicate canonical cells (e.g. two cp39 macosx
+                  # arm64 wheels with different deployment targets).
+                  if cell in seen_cells:
+                      print(f"Duplicate canonical cell {cell} in {basename}", file=sys.stderr)
+                      sys.exit(1)
+                  seen_cells.add(cell)
+
+                  # Parse METADATA: require exactly one METADATA entry.
+                  with zipfile.ZipFile(fpath) as z:
+                      meta_names = [n for n in z.namelist()
+                                    if n.endswith(".dist-info/METADATA")]
+                      if len(meta_names) != 1:
+                          print(f"Expected exactly 1 METADATA in {basename}, got {len(meta_names)}", file=sys.stderr)
+                          sys.exit(1)
+                      meta = z.read(meta_names[0]).decode()
+
+                      # Verify required Python source files.
+                      required = ["ferry/__init__.py", "ferry/_native.pyi", "ferry/py.typed"]
+                      names_in_wheel = z.namelist()
+                      for req in required:
+                          if not any(req == n or n.startswith(req + "/") for n in names_in_wheel):
+                              print(f"MISSING {req} in {basename}", file=sys.stderr)
+                              sys.exit(1)
+
+                      # Require a native extension (_native shared lib).
+                      has_native = any(
+                          n.startswith("ferry/_native.") and
+                          (n.endswith(".so") or n.endswith(".dylib") or n.endswith(".pyd"))
+                          for n in names_in_wheel
+                      )
+                      if not has_native:
+                          print(f"No ferry._native shared library in {basename}", file=sys.stderr)
+                          sys.exit(1)
+
+                       # Mandatory __version__ check: must parse and match.
+                      init_names = [n for n in names_in_wheel if n == "ferry/__init__.py"]
+                      if not init_names:
+                          print(f"Missing ferry/__init__.py in {basename}", file=sys.stderr)
+                          sys.exit(1)
+                      src = z.read(init_names[0]).decode()
+                      pvm = re.search(r'__version__\s*=\s*"([^"]+)"', src)
+                      if not pvm:
+                          print(f"Could not parse __version__ from {basename}", file=sys.stderr)
+                          sys.exit(1)
+                      if Version(pvm.group(1)) != expected_version:
+                          print(f"__version__ mismatch in {basename}: {pvm.group(1)} != {cargo_version}", file=sys.stderr)
+                          sys.exit(1)
+
+                  names.add(wname)
+                  versions.add(wver)
+
+              elif basename.endswith(".tar.gz"):
+                  if seen_sdist:
+                      print(f"Multiple sdists found", file=sys.stderr)
+                      sys.exit(1)
+                  seen_sdist = True
+
+                  sname, sver = parse_sdist_filename(basename)
+                  sname = canonicalize_name(sname)
+                  sver = Version(str(sver))
+
+                  with tarfile.open(fpath) as t:
+                      meta_members = [m for m in t.getmembers()
+                                      if m.name.endswith("PKG-INFO")]
+                      if len(meta_members) != 1:
+                          print(f"Expected exactly 1 PKG-INFO in {basename}, got {len(meta_members)}", file=sys.stderr)
+                          sys.exit(1)
+                      meta = t.extractfile(meta_members[0]).read().decode()
+
+                      if not any(m.name.endswith("ferry/__init__.py") for m in t.getmembers()):
+                          print(f"MISSING ferry/__init__.py in {basename}", file=sys.stderr)
+                          sys.exit(1)
+
+                      # Mandatory __version__ check.
+                      for member in t.getmembers():
+                          if member.name.endswith("ferry/__init__.py"):
+                              src = t.extractfile(member).read().decode()
+                              pvm = re.search(r'__version__\s*=\s*"([^"]+)"', src)
+                              if not pvm:
+                                  print(f"Could not parse __version__ from sdist {basename}", file=sys.stderr)
+                                  sys.exit(1)
+                              if Version(pvm.group(1)) != expected_version:
+                                  print(f"__version__ mismatch in {basename}: {pvm.group(1)} != {cargo_version}", file=sys.stderr)
+                                  sys.exit(1)
+                              break
+
+                  names.add(sname)
+                  versions.add(sver)
+
+              else:
+                  print(f"Unexpected extension: {basename}", file=sys.stderr)
+                  sys.exit(1)
+
+          # ---- Enforce exact matrix completeness -------------------------
+          # Require seen_cells == expected_cells (not just equal count).
+          missing_cells = expected_cells - seen_cells
+          extra_cells = seen_cells - expected_cells
+          if missing_cells or extra_cells:
+              print("Matrix mismatch:", file=sys.stderr)
+              if missing_cells:
+                  print(f"  Missing cells ({len(missing_cells)}):", file=sys.stderr)
+                  for c in sorted(missing_cells):
+                      print(f"    {c}", file=sys.stderr)
+              if extra_cells:
+                  print(f"  Extra cells ({len(extra_cells)}):", file=sys.stderr)
+                  for c in sorted(extra_cells):
+                      print(f"    {c}", file=sys.stderr)
+              sys.exit(1)
+          if not seen_sdist:
+              print("Missing sdist", file=sys.stderr)
+              sys.exit(1)
+          if len(all_files) != expected_total:
+              print(f"Expected {expected_total} total distributions, got {len(all_files)}", file=sys.stderr)
+              sys.exit(1)
+          if names != {expected_name}:
+              print(f"Unexpected project name(s): {names} (expected {expected_name})", file=sys.stderr)
+              sys.exit(1)
+          if len(versions) != 1:
+              print(f"Multiple versions found: {versions}", file=sys.stderr)
+              sys.exit(1)
+          found_version = next(iter(versions))
+          if str(found_version) != cargo_version:
+              print(f"Version mismatch: {found_version} != {cargo_version}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Validated {len(all_files)} distribution(s): name={expected_name} version={cargo_version}")
+          print(f"Matrix: {expected_wheel_count} wheels + {expected_sdist_count} sdist = {expected_total} total")
+          if tag_version:
+              print(f"Tag version: {tag_version}")
+          print("Version and matrix consistency: OK")
+
+          # ---- Stage allowlisted files into a fresh dist-final/ ----------
+          # Fail-closed: remove any pre-existing dist-final and recreate
+          # empty. No files from the checkout can enter the staging dir.
+          final_dir = Path("dist-final")
+          if final_dir.exists():
+              shutil.rmtree(final_dir)
+          final_dir.mkdir()
+
+          staged = []
+          for fpath in all_files:
+              dest = final_dir / Path(fpath).name
+              shutil.copy(fpath, dest)
+              staged.append(dest)
+
+          # ---- Compute SHA-256 manifest ----------------------------------
+          manifest = final_dir / "SHA256SUMS"
+          with manifest.open("w") as f:
+              for path in sorted(staged):
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  f.write(f"{digest}  {path.name}\n")
+          print("\nSHA-256 manifest:")
+          print(manifest.read_text())
+          PY
+
+      - name: twine check --strict
+        run: twine check --strict dist-final/*.whl dist-final/*.tar.gz
+
+      - name: Clean-environment install + import smoke test
+        run: |
+          uv venv verify-env
+          source verify-env/bin/activate
+          # Install the Linux x86_64 cp312 wheel specifically: we are
+          # on ubuntu-latest with setup-python 3.12. The glob is
+          # narrowly scoped to avoid matching macOS x86_64 wheels.
+          uv pip install dist-final/*cp312*manylinux_2_28_x86_64.whl
+          # Run from outside the checkout so the local ferry/ package dir
+          # cannot shadow the installed wheel.
+          cd "$RUNNER_TEMP"
+          python -c "import ferry; import ferry._native; print('OK', ferry.__version__)"
+
+      # Upload the validated artifact set as a single immutable artifact.
+      # Publish jobs download this artifact and verify the manifest before
+      # uploading, cryptographically binding validated bytes to published
+      # bytes.
+      - name: Upload validated dists + manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: validated-dists
+          path: dist-final/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Publish to TestPyPI (manual workflow_dispatch only, when dry_run is
+  # false). Uses the official PyPA publishing action which generates
+  # PEP 740 attestations via Sigstore using the job's OIDC identity.
+  # ---------------------------------------------------------------------
+  publish-testpypi:
+    name: Publish to TestPyPI
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/ferry-core/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # actions/download-artifact v4.3.0
+      - name: Download validated dists
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: validated-dists
+          path: dist
+      - name: Verify SHA-256 manifest and file set
+        run: |
+          cd dist
+          # Verify every file in the manifest is present and unmodified.
+          sha256sum -c SHA256SUMS
+          # Fail-closed: the directory must contain exactly the manifest
+          # subjects plus the manifest itself. No extra files.
+          manifest_files=$(awk '{print $2}' SHA256SUMS | sort)
+          dir_files=$(for f in *; do [ -f "$f" ] && [ "$f" != "SHA256SUMS" ] && echo "$f"; done | sort)
+          if [ "$manifest_files" != "$dir_files" ]; then
+            echo "ERROR: directory contents do not match manifest subjects" >&2
+            echo "Manifest expects:" >&2
+            echo "$manifest_files" >&2
+            echo "Directory contains:" >&2
+            echo "$dir_files" >&2
+            exit 1
+          fi
+          rm SHA256SUMS
+      # pypa/gh-action-pypi-publish v1.14.2: generates PEP 740
+      # attestations by default for Trusted Publishing flows.
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+          print-hash: true
+
+  # ---------------------------------------------------------------------
+  # Publish to production PyPI (v* tag PUSH only). Requires a reviewer
+  # on the `pypi` GitHub environment. Duplicate versions fail loudly
+  # (no skip-existing). PEP 740 attestations are generated by default.
+  # ---------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ferry-core/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # actions/checkout v7.0.1: fetch full history for ancestry check.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify tagged commit is reachable from main
+        run: |
+          # The tagged commit must be an ancestor of origin/main,
+          # proving it was merged through the protected release branch
+          # and not an arbitrary commit.
+          TAGGED_SHA="${GITHUB_SHA}"
+          if ! git merge-base --is-ancestor "$TAGGED_SHA" origin/main; then
+            echo "ERROR: tagged commit $TAGGED_SHA is not reachable from origin/main" >&2
+            echo "The tag must point at a commit that was merged via a reviewed PR." >&2
+            exit 1
+          fi
+          echo "Ancestry check OK: tagged commit is reachable from origin/main"
+      # actions/download-artifact v4.3.0
+      - name: Download validated dists
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: validated-dists
+          path: dist
+      - name: Verify SHA-256 manifest and file set
+        run: |
+          cd dist
+          # Verify every file in the manifest is present and unmodified.
+          sha256sum -c SHA256SUMS
+          # Fail-closed: the directory must contain exactly the manifest
+          # subjects plus the manifest itself. No extra files.
+          manifest_files=$(awk '{print $2}' SHA256SUMS | sort)
+          dir_files=$(for f in *; do [ -f "$f" ] && [ "$f" != "SHA256SUMS" ] && echo "$f"; done | sort)
+          if [ "$manifest_files" != "$dir_files" ]; then
+            echo "ERROR: directory contents do not match manifest subjects" >&2
+            echo "Manifest expects:" >&2
+            echo "$manifest_files" >&2
+            echo "Directory contains:" >&2
+            echo "$dir_files" >&2
+            exit 1
+          fi
+          rm SHA256SUMS
+      # pypa/gh-action-pypi-publish v1.14.2: generates PEP 740
+      # attestations by default for Trusted Publishing flows.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          print-hash: true
+
+  # ---------------------------------------------------------------------
+  # Post-release verification: install the exact tagged version from PyPI
+  # in a clean environment and import the real package. Retries to allow
+  # for PyPI propagation delay.
+  # ---------------------------------------------------------------------
+  verify-pypi:
+    name: Verify PyPI release
+    runs-on: ubuntu-latest
+    needs: [publish-pypi]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # actions/setup-python v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # astral-sh/setup-uv v10.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Extract version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+      - name: Clean install from PyPI and import (with retries)
+        run: |
+          uv venv verify-env
+          source verify-env/bin/activate
+          VERSION="${{ steps.ver.outputs.version }}"
+          installed=false
+          for i in 1 2 3 4 5; do
+            if uv pip install --no-cache "ferry-core==${VERSION}"; then
+              installed=true
+              break
+            fi
+            echo "Attempt $i failed; waiting for PyPI propagation..."
+            sleep 30
+          done
+          if [ "$installed" != "true" ]; then
+            echo "ERROR: failed to install ferry-core==${VERSION} from PyPI after 5 attempts" >&2
+            echo "The package may not have propagated yet, or the version may not exist." >&2
+            exit 1
+          fi
+          cd "$RUNNER_TEMP"
+          python -c "import ferry; import ferry._native; print('PyPI OK', ferry.__version__)"
