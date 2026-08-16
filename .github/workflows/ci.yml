@@ -101,3 +101,128 @@ jobs:
         # shadow the installed wheel on sys.path.
         working-directory: ${{ runner.temp }}
         run: python -c "import ferry; import ferry._native; print('OK', ferry.__version__)"
+
+  dagster-ferry-static:
+    name: dagster-ferry static and package (3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.85.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+      - name: Build ferry-core wheel into isolated directory
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out ${{ runner.temp }}/ferry-wheels-static
+          working-directory: crates/ferry-python
+      - name: Sync integration environment
+        working-directory: integrations/dagster-ferry
+        env:
+          ISOLATED_WHEELS_DIR: ${{ runner.temp }}/ferry-wheels-static
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ferry_core_wheels=( "$ISOLATED_WHEELS_DIR"/ferry_core-*.whl )
+          if [ "${#ferry_core_wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one ferry-core wheel, found ${#ferry_core_wheels[@]}" >&2
+            exit 1
+          fi
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python "${ferry_core_wheels[0]}"
+          # The editable install follows [tool.uv.sources] and may rebuild
+          # ferry-core into the Cargo target dir. That rebuild does not touch
+          # the isolated validated wheel above.
+          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Ruff check
+        working-directory: integrations/dagster-ferry
+        run: .venv/bin/ruff check dagster_ferry tests
+      - name: Ruff format check
+        working-directory: integrations/dagster-ferry
+        run: .venv/bin/ruff format --check dagster_ferry tests
+      - name: Pyright
+        working-directory: integrations/dagster-ferry
+        run: .venv/bin/pyright
+      - name: Build integration wheel
+        working-directory: integrations/dagster-ferry
+        run: uv build
+      - name: Clean install smoke test
+        working-directory: ${{ runner.temp }}
+        env:
+          ISOLATED_WHEELS_DIR: ${{ runner.temp }}/ferry-wheels-static
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          integration_dir="$GITHUB_WORKSPACE/integrations/dagster-ferry"
+
+          # Resolve exactly one dagster-ferry wheel and one ferry-core wheel.
+          # Fail closed if a glob expands to zero or more than one match.
+          # The ferry-core wheel comes from the isolated directory, not the
+          # shared Cargo target, so editable rebuilds cannot add stale wheels.
+          integration_wheels=( "$integration_dir"/dist/dagster_ferry-*.whl )
+          if [ "${#integration_wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one dagster-ferry wheel, found ${#integration_wheels[@]}" >&2
+            exit 1
+          fi
+          ferry_core_wheels=( "$ISOLATED_WHEELS_DIR"/ferry_core-*.whl )
+          if [ "${#ferry_core_wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one ferry-core wheel, found ${#ferry_core_wheels[@]}" >&2
+            exit 1
+          fi
+
+          python -m venv clean-venv
+          clean-venv/bin/python -m pip install --no-input \
+            "${integration_wheels[0]}" "${ferry_core_wheels[0]}"
+          clean-venv/bin/python -c "import dagster_ferry; print('OK', dagster_ferry.__version__, dagster_ferry.__all__)"
+
+  dagster-ferry-test:
+    name: dagster-ferry test (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.85.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v7
+      - name: Build ferry-core wheel into isolated directory
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out ${{ runner.temp }}/ferry-wheels-test-${{ matrix.python-version }}
+          working-directory: crates/ferry-python
+      - name: Sync integration environment
+        working-directory: integrations/dagster-ferry
+        env:
+          ISOLATED_WHEELS_DIR: ${{ runner.temp }}/ferry-wheels-test-${{ matrix.python-version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ferry_core_wheels=( "$ISOLATED_WHEELS_DIR"/ferry_core-*.whl )
+          if [ "${#ferry_core_wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one ferry-core wheel, found ${#ferry_core_wheels[@]}" >&2
+            exit 1
+          fi
+          uv venv --python ${{ matrix.python-version }} .venv
+          uv pip install --python .venv/bin/python "${ferry_core_wheels[0]}"
+          # The editable install follows [tool.uv.sources] and may rebuild
+          # ferry-core into the Cargo target dir. That rebuild does not touch
+          # the isolated validated wheel above.
+          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Pytest
+        working-directory: integrations/dagster-ferry
+        run: .venv/bin/python -m pytest tests -q
