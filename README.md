@@ -241,17 +241,22 @@ pip install dagster-ferry
 ```
 
 ```python
-from dagster import Definitions, EnvVar
-from dagster_ferry import DagsterFerryResource
+from dagster import AssetExecutionContext, Definitions, EnvVar
+from dagster_ferry import DagsterFerryResource, ferry_assets
+
+@ferry_assets(project_dir="path/to/ferry/project")
+def customer_syncs(context: AssetExecutionContext, ferry: DagsterFerryResource):
+    yield from ferry.run(context)
 
 defs = Definitions(
+    assets=[customer_syncs],
     resources={
         "ferry": DagsterFerryResource(project_dir=EnvVar("FERRY_PROJECT_DIR")),
     },
 )
 ```
 
-`DagsterFerryResource` loads a native `ferry.Project` once per resource lifecycle for use inside Dagster definitions. Asset factories and translators ship in a later release.
+`@ferry_assets` discovers every configured sync once at decoration time and returns one subsettable multi-asset, one `AssetSpec` per sync. `DagsterFerryResource.run` executes exactly the syncs Dagster selected for the current materialization and yields one `MaterializeResult` per selected sync. `DagsterFerryTranslator` customizes asset key, description, group, tags, and kinds.
 
 ## Ecosystem
 

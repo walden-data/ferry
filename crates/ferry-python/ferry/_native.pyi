@@ -6,6 +6,7 @@ from typing import List, Optional
 class Project:
     def __init__(self, project_dir: str) -> None: ...
     def list_syncs(self) -> List[str]: ...
+    def list_syncs_metadata(self) -> List[SyncMetadata]: ...
     def run(
         self,
         sync_names: Optional[List[str]] = None,
@@ -30,6 +31,15 @@ class SyncResult:
     duration_seconds: float
     dry_run: bool
     mode: str
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+
+class SyncMetadata:
+    # Immutable, frozen dataclass-like type. Fields are read-only.
+    name: str
+    description: Optional[str]
+    tags: List[str]
+    destination_type: str
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 

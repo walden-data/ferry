@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import ferry
-from dagster import ConfigurableResource, InitResourceContext
+from dagster import (
+    AssetExecutionContext,
+    AssetKey,
+    ConfigurableResource,
+    InitResourceContext,
+    MaterializeResult,
+)
 from pydantic import PrivateAttr
 
 __all__ = ["DagsterFerryResource"]
@@ -29,6 +37,10 @@ class DagsterFerryResource(ConfigurableResource["DagsterFerryResource"]):
     or ``ValueError`` with a clear message. Native ``ferry`` errors
     (``ferry.FerryError`` and its subclasses, plus ``ValueError`` raised by
     the native constructor) propagate with their original causes preserved.
+
+    Use :meth:`run` inside a ``@ferry_assets`` decorated function. It executes
+    exactly the syncs Dagster selected for the current materialization and
+    yields one ``MaterializeResult`` per selected successful sync.
     """
 
     project_dir: str
@@ -93,3 +105,80 @@ class DagsterFerryResource(ConfigurableResource["DagsterFerryResource"]):
         if self._project is None:
             self._project = self._build_project()
         return self._project
+
+    def run(self, context: AssetExecutionContext) -> Iterator[MaterializeResult[Any]]:
+        """Execute exactly the syncs Dagster selected for the current run.
+
+        Reads the selected asset keys from ``context.selected_asset_keys``.
+        It maps them back to native Ferry sync names via stable metadata on
+        the bound ``AssetsDefinition``. It then calls native
+        ``Project.run(sync_names=[...])`` exactly once with the sorted selected
+        sync names. It validates that the returned result names exactly match
+        the selected set, then yields one minimal ``MaterializeResult`` per
+        successful result.
+
+        Behavior:
+
+        * Empty selection: yields nothing and does not call Ferry.
+        * Result-name mismatch: raises ``RuntimeError`` with the diff so a
+          partial or unexpected native result is never silently accepted.
+        * Native Ferry execution errors propagate through Dagster's normal
+          boundary. This method does not broad-wrap them.
+
+        The mapping from selected asset keys to native sync names is read from
+        the ``AssetsDefinition`` bound to the context. A custom
+        ``DagsterFerryTranslator`` that changes asset keys still routes
+        execution to the correct native sync. This method never infers a sync
+        name from ``AssetKey.path[-1]``.
+        """
+        # Lazy import avoids a circular import at module load time.
+        from dagster_ferry._assets import key_to_sync_map
+
+        assets_def = context.assets_def
+        key_map = key_to_sync_map(assets_def)
+
+        # Sort selected keys deterministically by path tuple. AssetKey.path is
+        # a Sequence[str]; tuple() gives a stable orderable key.
+        selected_keys: list[AssetKey] = sorted(
+            context.selected_asset_keys, key=lambda k: tuple(k.path)
+        )
+        selected_sync_names: list[str] = []
+        for key in selected_keys:
+            sync_name = key_map.get(key)
+            if sync_name is None:
+                msg = (
+                    f"Selected asset key {key.to_user_string()!r} is not mapped to a "
+                    "Ferry sync name. This indicates the AssetsDefinition was not built "
+                    "by ferry_assets or its metadata was stripped."
+                )
+                raise RuntimeError(msg)
+            selected_sync_names.append(sync_name)
+
+        if not selected_sync_names:
+            # Empty selection: yield nothing and do not call Ferry. The
+            # unreachable yield below keeps this function a generator even when
+            # the selection is empty.
+            return
+            yield  # pragma: no cover - makes this a generator statically
+
+        # Sort for deterministic native invocation order.
+        sorted_sync_names = sorted(selected_sync_names)
+        results = self.project.run(sync_names=sorted_sync_names)
+
+        result_names = {r.sync_name for r in results}
+        expected_names = set(sorted_sync_names)
+        if result_names != expected_names:
+            missing = sorted(expected_names - result_names)
+            extra = sorted(result_names - expected_names)
+            msg = (
+                f"Ferry returned result names that do not exactly match the selected "
+                f"sync names. missing={missing!r} extra={extra!r}. "
+                "This indicates a partial or unexpected native run."
+            )
+            raise RuntimeError(msg)
+
+        # Yield one minimal MaterializeResult per selected successful result,
+        # in deterministic key order. The result-name set was validated above,
+        # so each selected sync name has a matching result.
+        for key in selected_keys:
+            yield MaterializeResult(asset_key=key)

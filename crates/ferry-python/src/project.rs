@@ -14,6 +14,7 @@ use crate::dead_row::DeadRow;
 use crate::diff_preview::DiffPreview;
 use crate::error::ferry_error_to_py_err;
 use crate::factory;
+use crate::sync_metadata::SyncMetadata;
 use crate::sync_result::SyncResult;
 
 /// A Ferry project, providing access to sync configuration and execution.
@@ -63,6 +64,23 @@ impl Project {
         let syncs_dir = project_dir.join("syncs");
         let syncs = SyncConfig::load_all(&syncs_dir).map_err(ferry_error_to_py_err)?;
         Ok(syncs.into_iter().map(|s| s.name).collect())
+    }
+
+    /// List typed metadata for all syncs in the project.
+    ///
+    /// Returns one `SyncMetadata` per configured sync, sorted deterministically
+    /// by sync name so downstream asset keys and ordering are reload-stable.
+    /// Reuses the native `SyncConfig::load_all` path and does not reparse YAML
+    /// on the Python side.
+    fn list_syncs_metadata(&self) -> PyResult<Vec<SyncMetadata>> {
+        let project_dir = Path::new(&self.project_dir);
+        let syncs_dir = project_dir.join("syncs");
+        let mut syncs = SyncConfig::load_all(&syncs_dir).map_err(ferry_error_to_py_err)?;
+        // Sort by name for deterministic, reload-stable ordering. The native
+        // loader already sorts by filename, but sorting by name makes the
+        // contract explicit and resilient to filename changes.
+        syncs.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(syncs.iter().map(SyncMetadata::from_sync_config).collect())
     }
 
     /// Run syncs.
