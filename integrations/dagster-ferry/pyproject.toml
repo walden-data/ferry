@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dagster-ferry"
-version = "0.1.0"
+version = "0.2.0"
 description = "Dagster integration for Ferry, a Rust-native reverse ETL engine."
 readme = "README.md"
 license = { text = "MIT" }
@@ -26,7 +26,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "dagster>=1.8",
+    "dagster>=1.8.10",
     "ferry-core>=0.1.0",
 ]
 
@@ -35,6 +35,7 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
     "pyright>=1.1",
+    "duckdb>=0.10",
 ]
 
 [project.urls]

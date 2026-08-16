@@ -6,6 +6,7 @@ try:
     from ferry._native import (
         Project,
         SyncResult,
+        SyncMetadata,
         DiffPreview,
         DeadRow,
         FerryError,
@@ -28,6 +29,7 @@ except ImportError as e:
 __all__ = [
     "Project",
     "SyncResult",
+    "SyncMetadata",
     "DiffPreview",
     "DeadRow",
     "FerryError",

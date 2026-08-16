@@ -84,6 +84,7 @@ def test_wheel_contains_resource_and_init(built_wheel: Path) -> None:
     names = _wheel_names(built_wheel)
     assert "dagster_ferry/__init__.py" in names
     assert "dagster_ferry/_resource.py" in names
+    assert "dagster_ferry/_assets.py" in names
     assert "dagster_ferry/_version.py" in names
 
 
@@ -92,7 +93,10 @@ def test_wheel_metadata_declares_dependencies(built_wheel: Path) -> None:
     assert "Requires-Dist: dagster>=" in metadata
     assert "Requires-Dist: ferry-core>=" in metadata
     assert "Name: dagster-ferry" in metadata
-    assert "Version: 0.1.0" in metadata
+    assert "Version: 0.2.0" in metadata
+    # The dagster floor is 1.8.10 because AssetSpec(kinds=...) first shipped
+    # in that release. Assert the honest floor is declared.
+    assert "Requires-Dist: dagster>=1.8.10" in metadata
 
 
 def test_wheel_metadata_has_no_local_path_markers(built_wheel: Path) -> None:
@@ -135,5 +139,6 @@ def test_clean_install_imports_from_outside_checkout(built_wheel: Path, tmp_path
         neutral,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "0.1.0" in proc.stdout
+    assert "0.2.0" in proc.stdout
     assert "DagsterFerryResource" in proc.stdout
+    assert "ferry_assets" in proc.stdout

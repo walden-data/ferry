@@ -3,6 +3,7 @@ mod diff_preview;
 mod error;
 mod factory;
 mod project;
+mod sync_metadata;
 mod sync_result;
 
 use pyo3::prelude::*;
@@ -11,6 +12,7 @@ use dead_row::DeadRow;
 use diff_preview::DiffPreview;
 use error::*;
 use project::Project;
+use sync_metadata::SyncMetadata;
 use sync_result::SyncResult;
 
 /// Ferry - Reverse ETL engine with Python bindings.
@@ -19,6 +21,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register pyclasses
     m.add_class::<Project>()?;
     m.add_class::<SyncResult>()?;
+    m.add_class::<SyncMetadata>()?;
     m.add_class::<DiffPreview>()?;
     m.add_class::<DeadRow>()?;
 

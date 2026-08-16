@@ -260,16 +260,16 @@ State Commit (CDC hash + journal update)
 **Description:** Pure Python package exposing ferry syncs as Dagster assets, with first-class dependency tracking and metadata.
 
 **Acceptance Criteria:**
-- [ ] `@ferry_assets` decorator creates multi_asset with can_subset=True
-- [ ] `DagsterFerryResource` yields MaterializeResult per sync
-- [ ] `DagsterFerryTranslator` for customizing:
+- [x] `@ferry_assets` decorator creates multi_asset with can_subset=True
+- [x] `DagsterFerryResource` yields MaterializeResult per sync
+- [x] `DagsterFerryTranslator` for customizing:
   - Asset keys (default: sync name)
   - Group names (default: first tag or "default")
-  - Dependencies (default: auto-detected dbt deps if dagster-dbt present)
+  - ~~Dependencies (default: auto-detected dbt deps if dagster-dbt present)~~ deferred to FERRY-9
   - Kinds (default: `{"ferry", "<destination_type>"}`)
 - [ ] **dbt dependency auto-detection**: if a sync uses `model.ref: <model>` and dagster-dbt is present, ferry asset depends on the corresponding dbt asset (resolved via dbt manifest node name → Dagster asset key)
-- [ ] Sync `tags:` map to Dagster asset groups
-- [ ] Asset kinds: `{"ferry", "<destination_type>"}`
+- [x] Sync `tags:` map to Dagster asset groups
+- [x] Asset kinds: `{"ferry", "<destination_type>"}`
 - [ ] Dry-run controllable from Dagster UI RunConfig (not hardcoded)
 - [ ] DLQ row count surfaced as asset metadata (non-zero does not fail materialization)
 - [ ] `build_ferry_asset_specs()` for Dagster Pipes / remote execution (deferred to v0.2)
