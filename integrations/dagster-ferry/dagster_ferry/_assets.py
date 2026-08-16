@@ -36,10 +36,10 @@ from dagster import (
 
 __all__ = ["DagsterFerryTranslator", "ferry_assets"]
 
-# Internal, stable metadata key holding the native Ferry sync name. This is an
-# implementation detail: the value is read by DagsterFerryResource.run to map
-# selected asset keys back to native sync names without inferring from the
-# (translator-customizable) AssetKey path.
+# Internal, stable metadata key holding the native Ferry sync name. The value
+# is read by DagsterFerryResource.run to map selected asset keys back to native
+# sync names. It avoids inferring from the (translator-customizable) AssetKey
+# path.
 _FERRY_SYNC_NAME_META = "ferry/sync_name"
 
 # Dagster tag value character set: alphanumerics, `_`, `-`, `.` and <= 63 chars.
@@ -52,9 +52,9 @@ _TAG_VALUE_MAX = 63
 def _coerce_tag_value(parts: Sequence[str]) -> str:
     """Join Ferry tag parts into a single safe Dagster tag value.
 
-    Raises ValueError when the resulting value cannot be represented as a
-    Dagster tag value, so the failure surfaces at decoration time rather than
-    as an opaque Dagster error.
+    Raises ValueError when the result cannot be represented as a Dagster tag
+    value. The failure surfaces at decoration time, not as an opaque Dagster
+    error later.
     """
     joined = ".".join(p for p in parts if p)
     if not joined:
@@ -82,13 +82,13 @@ class DagsterFerryTranslator:
     """Translate Ferry sync metadata into Dagster asset properties.
 
     Override any of the methods below to customize asset shape. The base
-    implementation provides the documented defaults:
+    implementation provides the documented defaults.
 
-    * key: `AssetKey(sync.name)` (no sanitization, no prefix)
-    * description: configured description, with a deterministic fallback
-    * group: first configured tag, or `default` when absent
-    * tags: the ordered Ferry tag list under `ferry/tags`
-    * kinds: `ferry` plus the destination type
+    * key: `AssetKey(sync.name)`, unsanitized and unprefixed.
+    * description: the configured description, with a deterministic fallback.
+    * group: the first configured tag, or `default` when absent.
+    * tags: the ordered Ferry tag list under `ferry/tags`.
+    * kinds: `ferry` plus the destination type.
 
     Only key, description, group, tags, and kinds are customizable here. dbt
     dependencies and rich run metadata remain deferred.
@@ -129,9 +129,9 @@ def _build_spec(translator: DagsterFerryTranslator, sync: ferry.SyncMetadata) ->
     """Build a single AssetSpec from a sync and translator, attaching the
     stable internal sync-name mapping metadata.
 
-    Translator return values are checked at runtime so a subclass that returns
-    an unexpected type fails at decoration time with a contextual error rather
-    than an opaque Dagster error later.
+    Translator return values are checked at runtime. A subclass that returns
+    an unexpected type fails at decoration time with a contextual error, not
+    an opaque Dagster error later.
     """
     # Cast through Any so pyright does not narrow these to their declared
     # types and the runtime isinstance checks remain meaningful.

@@ -1,9 +1,10 @@
 """Tests for the ferry_assets decorator, translator, and resource.run.
 
-These tests cover discovery, deterministic ordering, default and custom
-translator behavior, duplicate and invalid-config errors, exact subset
-selection, full selection, empty selection, result-name mismatch, native
-runtime failure propagation, and one credentials-free real execution.
+These tests cover discovery, deterministic ordering, and default and custom
+translator behavior. They also cover duplicate and invalid-config errors,
+exact subset selection, full selection, empty selection, result-name
+mismatch, native runtime failure propagation, and one credentials-free real
+execution.
 
 Spies/fakes are used for exact selection and mismatch assertions. A real
 local Ferry fixture (DuckDB source and file destination) backs the
@@ -327,7 +328,7 @@ def _resource_with_fake_project(project_dir: Path, run_impl: Any) -> DagsterFerr
     """Build a resource whose native project.run is replaced by a fake.
 
     The native ``ferry.Project`` pyclass does not allow monkeypatching its
-    ``run`` method, so this helper constructs a resource subclass that skips
+    ``run`` method. This helper constructs a resource subclass that skips
     ``setup_for_execution`` rebuilding the real project. The fake project is
     installed up front and preserved across the Dagster run lifecycle.
     """
