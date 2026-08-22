@@ -343,7 +343,7 @@ impl Manifest {
                 let kinds = non_model_kinds.join(", ");
                 return Err(FerryError::Config(format!(
                     "dbt ref '{model_name}' resolves to a non-model node \
-                     (resource_type: {kinds}) — Ferry can only depend on dbt models. \
+                     (resource_type: {kinds}). Ferry can only depend on dbt models. \
                      Available models: {}",
                     if available.is_empty() {
                         "(none)".to_string()
@@ -371,9 +371,9 @@ impl Manifest {
             })
             .collect();
         if !ephemeral_matches.is_empty() && ephemeral_matches.len() == matches.len() {
-            // All matches are ephemeral — same contextual error as resolve_ref.
+            // All matches are ephemeral: same contextual error as resolve_ref.
             return Err(FerryError::Config(format!(
-                "Model '{model_name}' is ephemeral — ephemeral models cannot be used as Ferry sources. \
+                "Model '{model_name}' is ephemeral: ephemeral models cannot be used as Ferry sources. \
                  Change the materialization to 'table' or 'view' in your dbt project."
             )));
         }
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn test_resolve_model_metadata_does_not_read_compiled_code() {
         // A model with no compiled_code/raw_code at all should still resolve
-        // metadata successfully — metadata resolution is independent of SQL.
+        // metadata successfully: metadata resolution is independent of SQL.
         let json = serde_json::json!({
             "metadata": {
                 "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v7.json",

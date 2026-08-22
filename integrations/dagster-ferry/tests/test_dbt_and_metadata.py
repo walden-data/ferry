@@ -849,7 +849,7 @@ def test_stale_manifest_loads_and_warns_only(
         "metadata": {
             "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v7.json",
             "dbt_version": "1.7.0",
-            # 30 days ago — well past the 24h freshness bound.
+            # 30 days ago, well past the 24h freshness bound.
             "generated_at": "2026-07-23T10:00:00.000Z",
         },
         "nodes": {

@@ -350,7 +350,7 @@ def ferry_dbt_project_missing_manifest_config(
     state_path = tmp_path / "state.db"
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    # No dbt block — ferry.yml has no manifest_path.
+    # No dbt block: ferry.yml has no manifest_path.
     _write_ferry_yml(project_dir, ferry_source_db, state_path)
     syncs_dir = project_dir / "syncs"
     syncs_dir.mkdir()
