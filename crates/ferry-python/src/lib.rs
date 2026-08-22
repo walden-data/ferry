@@ -1,3 +1,4 @@
+mod dbt_model_metadata;
 mod dead_row;
 mod diff_preview;
 mod error;
@@ -8,6 +9,7 @@ mod sync_result;
 
 use pyo3::prelude::*;
 
+use dbt_model_metadata::DbtModelMetadata;
 use dead_row::DeadRow;
 use diff_preview::DiffPreview;
 use error::*;
@@ -22,6 +24,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Project>()?;
     m.add_class::<SyncResult>()?;
     m.add_class::<SyncMetadata>()?;
+    m.add_class::<DbtModelMetadata>()?;
     m.add_class::<DiffPreview>()?;
     m.add_class::<DeadRow>()?;
 

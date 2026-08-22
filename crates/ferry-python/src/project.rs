@@ -5,11 +5,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 
-use ferry_core::config::{FerryConfig, SyncConfig};
+use ferry_core::config::{FerryConfig, ModelConfig, SyncConfig};
+use ferry_core::dbt::Manifest;
 use ferry_core::engine::{Engine, RunOptions};
 use ferry_core::state::DuckDbStateStore;
 use ferry_core::traits::StateStore;
 
+use crate::dbt_model_metadata::DbtModelMetadata;
 use crate::dead_row::DeadRow;
 use crate::diff_preview::DiffPreview;
 use crate::error::ferry_error_to_py_err;
@@ -72,6 +74,21 @@ impl Project {
     /// by sync name so downstream asset keys and ordering are reload-stable.
     /// Reuses the native `SyncConfig::load_all` path and does not reparse YAML
     /// on the Python side.
+    ///
+    /// dbt model metadata is resolved additively:
+    ///
+    /// * SQL-only projects with no `dbt:` block keep working unchanged; every
+    ///   sync carries `dbt_model = None`.
+    /// * A `model.ref` sync requires a configured `dbt.manifest_path`. If the
+    ///   manifest is missing or malformed, discovery fails with the same
+    ///   `ferry.ConfigError` that native execution would raise. If a dbt ref
+    ///   is used without any manifest configuration, discovery fails with a
+    ///   clear configuration error.
+    /// * The manifest is loaded exactly once for the whole project. Each
+    ///   `model.ref` sync resolves its dbt model metadata via the deterministic
+    ///   `Manifest::resolve_model_metadata` resolver, which rejects ambiguous
+    ///   same-name matches and lists candidate unique ids. SQL syncs never
+    ///   touch the manifest.
     fn list_syncs_metadata(&self) -> PyResult<Vec<SyncMetadata>> {
         let project_dir = Path::new(&self.project_dir);
         let syncs_dir = project_dir.join("syncs");
@@ -80,7 +97,35 @@ impl Project {
         // loader already sorts by filename, but sorting by name makes the
         // contract explicit and resilient to filename changes.
         syncs.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(syncs.iter().map(SyncMetadata::from_sync_config).collect())
+
+        // Load the dbt manifest once if `dbt.manifest_path` is configured. The
+        // manifest is only required when at least one sync uses `model.ref`;
+        // SQL-only projects never load it and keep working unchanged.
+        let manifest = self.load_manifest_for_metadata(project_dir)?;
+
+        syncs
+            .iter()
+            .map(|sync| {
+                let dbt_model = match &sync.model {
+                    ModelConfig::Sql { .. } => None,
+                    ModelConfig::Ref { r#ref } => {
+                        let manifest = manifest.as_ref().ok_or_else(|| {
+                            ferry_error_to_py_err(ferry_core::error::FerryError::Config(format!(
+                                "Sync '{}' uses model.ref: '{}' but no dbt manifest is \
+                                     configured. Set dbt.manifest_path in ferry.yml to enable \
+                                     dbt ref resolution.",
+                                sync.name, r#ref,
+                            )))
+                        })?;
+                        let meta = manifest
+                            .resolve_model_metadata(r#ref)
+                            .map_err(ferry_error_to_py_err)?;
+                        Some(DbtModelMetadata::from_core(meta))
+                    }
+                };
+                Ok(SyncMetadata::from_sync_config(sync, dbt_model))
+            })
+            .collect()
     }
 
     /// Run syncs.
@@ -334,5 +379,32 @@ impl Project {
             }
             Ok(total)
         })
+    }
+}
+
+// Non-Python-facing helper methods live in a separate impl block so they are
+// not picked up by the `#[pymethods]` attribute above.
+impl Project {
+    /// Load the dbt manifest once for metadata resolution.
+    ///
+    /// Returns `Ok(None)` when no `dbt:` block or `manifest_path` is configured
+    /// (SQL-only projects). Returns `Ok(Some(manifest))` when configured and
+    /// parseable. Returns `Err` when configured but the file is missing or
+    /// malformed, surfacing the same `ferry.ConfigError` native execution
+    /// would raise so misconfiguration fails at discovery rather than run
+    /// time. Staleness follows the existing Ferry advisory policy (warn only).
+    fn load_manifest_for_metadata(&self, project_dir: &Path) -> PyResult<Option<Manifest>> {
+        let config = FerryConfig::load(project_dir).map_err(ferry_error_to_py_err)?;
+        let Some(dbt_config) = &config.dbt else {
+            return Ok(None);
+        };
+        let Some(manifest_path) = &dbt_config.manifest_path else {
+            return Ok(None);
+        };
+        let manifest = Manifest::load(Path::new(manifest_path)).map_err(ferry_error_to_py_err)?;
+        // Stale manifests follow the existing Ferry freshness policy: warn
+        // only, never error. This matches Engine::new behavior.
+        let _ = manifest.check_freshness(24);
+        Ok(Some(manifest))
     }
 }

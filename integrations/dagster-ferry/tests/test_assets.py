@@ -44,10 +44,21 @@ class _FakeResult:
 
     The native SyncResult pyclass does not expose a Python constructor, so
     tests that need to fake native return values use this dataclass instead.
-    resource.run only reads `sync_name` from each result.
+    All fields mirror the native SyncResult surface so resource.run can attach
+    typed metadata without hitting AttributeError on the fake.
     """
 
     sync_name: str
+    run_id: str = "run-fake-0000"
+    rows_extracted: int = 0
+    rows_synced: int = 0
+    rows_failed: int = 0
+    rows_pending: int = 0
+    rows_retried: int = 0
+    rows_dead: int = 0
+    duration_seconds: float = 0.0
+    dry_run: bool = False
+    mode: str = "incremental"
 
 
 # ---------------------------------------------------------------------------

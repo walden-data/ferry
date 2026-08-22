@@ -14,6 +14,7 @@ from dagster import (
     ConfigurableResource,
     InitResourceContext,
     MaterializeResult,
+    MetadataValue,
 )
 from pydantic import PrivateAttr
 
@@ -114,14 +115,15 @@ class DagsterFerryResource(ConfigurableResource["DagsterFerryResource"]):
         the bound ``AssetsDefinition``. It then calls native
         ``Project.run(sync_names=[...])`` exactly once with the sorted selected
         sync names. It validates that the returned result names exactly match
-        the selected set, then yields one minimal ``MaterializeResult`` per
-        successful result.
+        the selected set, then yields one ``MaterializeResult`` per
+        successful result with typed run metadata attached.
 
         Behavior:
 
         * Empty selection: yields nothing and does not call Ferry.
         * Result-name mismatch: raises ``RuntimeError`` with the diff so a
-          partial or unexpected native result is never silently accepted.
+          partial or unexpected native result is never silently accepted. No
+          materialization is yielded before the full selected set validates.
         * Native Ferry execution errors propagate through Dagster's normal
           boundary. This method does not broad-wrap them.
 
@@ -130,6 +132,12 @@ class DagsterFerryResource(ConfigurableResource["DagsterFerryResource"]):
         ``DagsterFerryTranslator`` that changes asset keys still routes
         execution to the correct native sync. This method never infers a sync
         name from ``AssetKey.path[-1]``.
+
+        Materialization metadata uses only fields directly exposed by the
+        native ``SyncResult``. Ferry run UUIDs are rendered as text (they are
+        not Dagster run ids). Genuine zero row counts are emitted. Metrics
+        that Ferry does not expose (changed/skipped) and any invented status
+        are omitted. See the README for the full key list.
         """
         # Lazy import avoids a circular import at module load time.
         from dagster_ferry._assets import key_to_sync_map
@@ -177,8 +185,46 @@ class DagsterFerryResource(ConfigurableResource["DagsterFerryResource"]):
             )
             raise RuntimeError(msg)
 
-        # Yield one minimal MaterializeResult per selected successful result,
-        # in deterministic key order. The result-name set was validated above,
-        # so each selected sync name has a matching result.
+        # The complete selected result set validated above. Index by sync name
+        # so each selected key resolves to its matching result regardless of
+        # the order Project.run returned them in. No materialization is yielded
+        # before this point.
+        results_by_name = {r.sync_name: r for r in results}
+
+        # Yield one MaterializeResult per selected successful result, in
+        # deterministic key order, with typed run metadata from SyncResult.
         for key in selected_keys:
-            yield MaterializeResult(asset_key=key)
+            sync_name = key_map[key]
+            result = results_by_name[sync_name]
+            yield MaterializeResult(asset_key=key, metadata=_result_metadata(result))
+
+
+def _result_metadata(result: ferry.SyncResult) -> dict[str, Any]:
+    """Build typed Dagster metadata from a native Ferry ``SyncResult``.
+
+    Uses only fields directly exposed by ``SyncResult``. Ferry run UUIDs are
+    rendered as ``MetadataValue.text`` (they are foreign ids, not Dagster run
+    ids). Genuine zero row counts are emitted as ``MetadataValue.int(0)``.
+    Metrics Ferry does not expose (changed/skipped) and any invented status are
+    omitted entirely rather than fabricated.
+    """
+    return {
+        # Reuse the Dagster-conventional row-count key for delivered rows so
+        # the UI renders it as a time series.
+        "dagster/row_count": MetadataValue.int(result.rows_synced),
+        # Ferry run id is a foreign UUID; render as text, never as a Dagster
+        # run id.
+        "ferry/run_id": MetadataValue.text(result.run_id),
+        "ferry/rows_extracted": MetadataValue.int(result.rows_extracted),
+        "ferry/rows_delivered": MetadataValue.int(result.rows_synced),
+        "ferry/rows_failed": MetadataValue.int(result.rows_failed),
+        "ferry/rows_pending": MetadataValue.int(result.rows_pending),
+        "ferry/rows_retried": MetadataValue.int(result.rows_retried),
+        # rows_dead is always exposed by SyncResult; emit it so operators can
+        # distinguish dead-lettered rows from other failure counts.
+        "ferry/rows_dead": MetadataValue.int(result.rows_dead),
+        # Duration, mode, and dry_run are all directly exposed scalar fields.
+        "ferry/duration_seconds": MetadataValue.float(result.duration_seconds),
+        "ferry/mode": MetadataValue.text(result.mode),
+        "ferry/dry_run": MetadataValue.bool(result.dry_run),
+    }

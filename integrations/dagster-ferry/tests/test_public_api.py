@@ -32,8 +32,8 @@ def test_ferry_assets_and_translator_are_exported() -> None:
 def test_version_is_independent_and_static() -> None:
     import dagster_ferry._version as version_module
 
-    assert dagster_ferry.__version__ == "0.2.0"
-    assert version_module.__version__ == "0.2.0"
+    assert dagster_ferry.__version__ == "0.3.0"
+    assert version_module.__version__ == "0.3.0"
 
 
 def test_module_has_no_side_effects_on_reimport() -> None:

@@ -11,7 +11,13 @@
       "resource_type": "model",
       "compiled_code": "SELECT id, email, name FROM analytics.fct_users",
       "relation_name": "\"analytics\".\"fct_users\"",
-      "config": { "materialized": "table" }
+      "alias": "fct_users",
+      "package_name": "test",
+      "schema": "analytics",
+      "database": "warehouse",
+      "fqn": ["test", "models", "analytics", "fct_users.sql"],
+      "config": { "materialized": "table", "schema": "analytics" },
+      "meta": {}
     },
     "model.test.fct_orders": {
       "unique_id": "model.test.fct_orders",
@@ -19,13 +25,20 @@
       "resource_type": "model",
       "compiled_code": "SELECT order_id, user_id, total FROM analytics.fct_orders WHERE status = 'completed'",
       "relation_name": "\"analytics\".\"fct_orders\"",
-      "config": { "materialized": "view" }
+      "alias": "fct_orders",
+      "package_name": "test",
+      "schema": "analytics",
+      "fqn": ["test", "models", "analytics", "fct_orders.sql"],
+      "config": { "materialized": "view", "schema": "analytics" },
+      "meta": { "dagster": { "asset_key": ["dbt", "fct_orders"] } }
     },
     "model.test.fct_ephemeral": {
       "unique_id": "model.test.fct_ephemeral",
       "name": "fct_ephemeral",
       "resource_type": "model",
       "compiled_code": "WITH x AS (SELECT 1) SELECT * FROM x",
+      "package_name": "test",
+      "schema": "analytics",
       "config": { "materialized": "ephemeral" }
     }
   },

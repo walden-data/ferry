@@ -2,12 +2,19 @@ use pyo3::prelude::*;
 
 use ferry_core::config::{DestinationConfig, SyncConfig};
 
+use crate::dbt_model_metadata::DbtModelMetadata;
+
 /// Stable metadata describing a single Ferry sync, returned by
 /// `Project.list_syncs_metadata()`.
 ///
 /// Fields are immutable and read-only from Python. The destination type is
 /// normalized to a stable lowercase string so Dagster asset kinds and other
 /// consumers can branch on it without importing Rust enums.
+///
+/// `dbt_model` is `Some` only for `model.ref` syncs when a dbt manifest is
+/// configured and the referenced model resolves deterministically. SQL-only
+/// syncs and projects without a manifest always carry `None`, preserving the
+/// FERRY-8 behavior for projects that never use dbt.
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct SyncMetadata {
@@ -19,21 +26,27 @@ pub struct SyncMetadata {
     pub tags: Vec<String>,
     #[pyo3(get)]
     pub destination_type: String,
+    /// Resolved dbt model identity, or `None` for SQL-only syncs.
+    #[pyo3(get)]
+    pub dbt_model: Option<DbtModelMetadata>,
 }
 
 impl SyncMetadata {
-    /// Build a `SyncMetadata` from a loaded `SyncConfig`.
+    /// Build a `SyncMetadata` from a loaded `SyncConfig` and an optional,
+    /// already-resolved dbt model metadata.
     ///
     /// Tags default to an empty vector when unset so callers can rely on a
     /// stable ordered sequence. The destination type is the lowercase variant
     /// name of `DestinationConfig` (`braze`, `slack`, `rest`, `file`,
-    /// `google_sheets`).
-    pub fn from_sync_config(config: &SyncConfig) -> Self {
+    /// `google_sheets`). `dbt_model` is attached as-is; the caller is
+    /// responsible for resolving it (or passing `None` for SQL syncs).
+    pub fn from_sync_config(config: &SyncConfig, dbt_model: Option<DbtModelMetadata>) -> Self {
         Self {
             name: config.name.clone(),
             description: config.description.clone(),
             tags: config.tags.clone().unwrap_or_default(),
             destination_type: destination_type_name(&config.destination),
+            dbt_model,
         }
     }
 }
@@ -98,19 +111,21 @@ mod tests {
             "users_sync",
             Some(vec!["team_a".to_string(), "team_b".to_string()]),
         );
-        let meta = SyncMetadata::from_sync_config(&config);
+        let meta = SyncMetadata::from_sync_config(&config, None);
         assert_eq!(meta.name, "users_sync");
         assert_eq!(meta.description.as_deref(), Some("desc"));
         assert_eq!(meta.tags, vec!["team_a", "team_b"]);
         assert_eq!(meta.destination_type, "file");
+        assert!(meta.dbt_model.is_none());
     }
 
     #[test]
     fn test_from_sync_config_defaults_empty_tags() {
         let config = sample_config("users_sync", None);
-        let meta = SyncMetadata::from_sync_config(&config);
+        let meta = SyncMetadata::from_sync_config(&config, None);
         assert!(meta.tags.is_empty());
         assert_eq!(meta.destination_type, "file");
+        assert!(meta.dbt_model.is_none());
     }
 
     #[test]
@@ -165,6 +180,7 @@ mod tests {
             description: None,
             tags: vec![],
             destination_type: "file".to_string(),
+            dbt_model: None,
         };
         let repr = meta.__repr__();
         assert!(repr.contains("users_sync"));

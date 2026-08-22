@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dagster-ferry"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dagster integration for Ferry, a Rust-native reverse ETL engine."
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,7 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "dagster>=1.8.10",
-    "ferry-core>=0.1.0",
+    "ferry-core>=0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +48,7 @@ Changelog = "https://github.com/walden-data/ferry/releases"
 # Local development only: link ferry-core to the in-tree PyO3 source so `uv
 # sync` resolves the native dependency without a published wheel. The
 # `[tool.uv.sources]` table is never propagated into built wheel METADATA, so
-# the published requirement stays `ferry-core>=0.1.0`.
+# the published requirement stays `ferry-core>=0.2.0`.
 [tool.uv.sources]
 ferry-core = { path = "../../crates/ferry-python", editable = true }
 

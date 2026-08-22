@@ -256,7 +256,7 @@ defs = Definitions(
 )
 ```
 
-`@ferry_assets` discovers every configured sync once at decoration time and returns one subsettable multi-asset, one `AssetSpec` per sync. `DagsterFerryResource.run` executes exactly the syncs Dagster selected for the current materialization and yields one `MaterializeResult` per selected sync. `DagsterFerryTranslator` customizes asset key, description, group, tags, and kinds.
+`@ferry_assets` discovers every configured sync once at decoration time and returns one subsettable multi-asset, one `AssetSpec` per sync. `DagsterFerryResource.run` executes exactly the syncs Dagster selected for the current materialization and yields one `MaterializeResult` per selected sync with typed run metadata from the native `SyncResult`. `DagsterFerryTranslator` customizes asset key, description, group, tags, kinds, and the upstream dbt asset-key mapping for `model.ref` syncs. Ferry never owns or emits the dbt-owned `AssetSpec`; it only adds the dbt key to `deps` for lineage. No `dagster-dbt` runtime dependency is required.
 
 ## Ecosystem
 
