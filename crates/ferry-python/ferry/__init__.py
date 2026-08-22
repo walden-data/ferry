@@ -1,12 +1,13 @@
 """Ferry - Reverse ETL engine with Python bindings."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 try:
     from ferry._native import (
         Project,
         SyncResult,
         SyncMetadata,
+        DbtModelMetadata,
         DiffPreview,
         DeadRow,
         FerryError,
@@ -30,6 +31,7 @@ __all__ = [
     "Project",
     "SyncResult",
     "SyncMetadata",
+    "DbtModelMetadata",
     "DiffPreview",
     "DeadRow",
     "FerryError",

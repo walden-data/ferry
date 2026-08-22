@@ -89,9 +89,12 @@ class DagsterFerryTranslator:
     * group: the first configured tag, or `default` when absent.
     * tags: the ordered Ferry tag list under `ferry/tags`.
     * kinds: `ferry` plus the destination type.
-
-    Only key, description, group, tags, and kinds are customizable here. dbt
-    dependencies and rich run metadata remain deferred.
+    * get_dbt_asset_key: the upstream dbt-owned `AssetKey` a `model.ref` sync
+      depends on, or `None` for SQL-only syncs. The default mirrors the
+      dagster-dbt default mapping (schema plus node name for models) and
+      honors `meta.dagster.asset_key` when present, without importing
+      dagster-dbt. Override this method to match a custom dagster-dbt
+      translator. Ferry never owns or emits an AssetSpec for the returned key.
     """
 
     def key(self, sync: ferry.SyncMetadata) -> AssetKey:
@@ -124,6 +127,45 @@ class DagsterFerryTranslator:
         """Return Dagster kinds for the sync: `ferry` plus the destination type."""
         return {"ferry", sync.destination_type}
 
+    def get_dbt_asset_key(self, sync: ferry.SyncMetadata) -> AssetKey | None:
+        """Return the upstream dbt-owned asset key for a `model.ref` sync.
+
+        Returns `None` for SQL-only syncs (no dbt dependency). For dbt-ref
+        syncs the default mirrors dagster-dbt's ``default_asset_key_fn`` exactly:
+
+        * ``config.meta.dagster.asset_key`` is checked first.
+        * Top-level ``meta.dagster.asset_key`` is the fallback override.
+        * Versioned models (dbt >= 1.5, ``version`` present) use ``[alias]``.
+        * Otherwise the key is ``[config_schema, name]`` when the configured
+          schema (``config.schema``) is available.
+        * Otherwise the key is ``[name]``.
+
+        Ferry never owns or emits an `AssetSpec` for the returned key. It is
+        only added to the Ferry sync's ``deps`` so Dagster draws a lineage edge
+        to the dbt-owned asset, which is materialized elsewhere (for example
+        by ``@dbt_assets``). Override this method to match a custom
+        dagster-dbt translator without taking a runtime dependency on
+        dagster-dbt.
+        """
+        dbt = sync.dbt_model
+        if dbt is None:
+            return None
+        # dagster-dbt reads config.meta before top-level meta.
+        if dbt.config_dagster_asset_key:
+            return AssetKey(list(dbt.config_dagster_asset_key))
+        if dbt.dagster_asset_key:
+            return AssetKey(list(dbt.dagster_asset_key))
+        # Versioned models use [alias], matching dagster-dbt.
+        if dbt.version:
+            # dbt guarantees alias is set for versioned models; fall back to
+            # name defensively in case of a minimal manifest.
+            return AssetKey([dbt.alias or dbt.name])
+        # Prefer the configured schema (config.schema), not the resolved
+        # top-level schema, matching dagster-dbt's default_asset_key_fn.
+        if dbt.config_schema:
+            return AssetKey([dbt.config_schema, dbt.name])
+        return AssetKey([dbt.name])
+
 
 def _build_spec(translator: DagsterFerryTranslator, sync: ferry.SyncMetadata) -> AssetSpec:
     """Build a single AssetSpec from a sync and translator, attaching the
@@ -132,6 +174,10 @@ def _build_spec(translator: DagsterFerryTranslator, sync: ferry.SyncMetadata) ->
     Translator return values are checked at runtime. A subclass that returns
     an unexpected type fails at decoration time with a contextual error, not
     an opaque Dagster error later.
+
+    The upstream dbt asset key (when any) is added to ``deps`` only. Ferry
+    never creates or emits an ``AssetSpec`` for the dbt-owned key; that key is
+    owned by the user's dbt asset definition elsewhere.
     """
     # Cast through Any so pyright does not narrow these to their declared
     # types and the runtime isinstance checks remain meaningful.
@@ -175,16 +221,26 @@ def _build_spec(translator: DagsterFerryTranslator, sync: ferry.SyncMetadata) ->
         )
         raise TypeError(msg)
 
+    dbt_key: Any = translator.get_dbt_asset_key(sync)
+    if dbt_key is not None and not isinstance(dbt_key, AssetKey):
+        msg = (
+            f"DagsterFerryTranslator.get_dbt_asset_key must return an AssetKey "
+            f"or None, got {type(dbt_key).__name__} for sync {sync.name!r}."
+        )
+        raise TypeError(msg)
+
     # Cast the validated Any values to their concrete types so pyright accepts
     # them as AssetSpec constructor arguments.
     tags_typed = cast(dict[str, str], tags)
     kinds_typed = cast(set[str], kinds)
+    deps: list[AssetKey] = [dbt_key] if dbt_key is not None else []
     return AssetSpec(
         key=key,
         description=description,
         group_name=group_name,
         tags=tags_typed,
         kinds=kinds_typed,
+        deps=deps,
         metadata={_FERRY_SYNC_NAME_META: sync.name},
     )
 

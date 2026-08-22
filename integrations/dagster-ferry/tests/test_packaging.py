@@ -93,7 +93,7 @@ def test_wheel_metadata_declares_dependencies(built_wheel: Path) -> None:
     assert "Requires-Dist: dagster>=" in metadata
     assert "Requires-Dist: ferry-core>=" in metadata
     assert "Name: dagster-ferry" in metadata
-    assert "Version: 0.2.0" in metadata
+    assert "Version: 0.3.0" in metadata
     # The dagster floor is 1.8.10 because AssetSpec(kinds=...) first shipped
     # in that release. Assert the honest floor is declared.
     assert "Requires-Dist: dagster>=1.8.10" in metadata
@@ -139,6 +139,6 @@ def test_clean_install_imports_from_outside_checkout(built_wheel: Path, tmp_path
         neutral,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "0.2.0" in proc.stdout
+    assert "0.3.0" in proc.stdout
     assert "DagsterFerryResource" in proc.stdout
     assert "ferry_assets" in proc.stdout

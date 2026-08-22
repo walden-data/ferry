@@ -40,6 +40,23 @@ class SyncMetadata:
     description: Optional[str]
     tags: List[str]
     destination_type: str
+    dbt_model: Optional[DbtModelMetadata]
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+
+class DbtModelMetadata:
+    # Immutable, frozen dataclass-like type. Fields are read-only.
+    unique_id: str
+    name: str
+    alias: Optional[str]
+    package_name: Optional[str]
+    schema: Optional[str]
+    config_schema: Optional[str]
+    database: Optional[str]
+    fqn: Optional[List[str]]
+    config_dagster_asset_key: Optional[List[str]]
+    dagster_asset_key: Optional[List[str]]
+    version: Optional[str]
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 
